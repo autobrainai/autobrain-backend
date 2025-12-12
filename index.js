@@ -1,3 +1,8 @@
+// index.js (or server.js)
+
+// ===============================
+//  Imports & Setup
+// ===============================
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -10,152 +15,195 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// -----------------------------
-// Supabase Client
-// -----------------------------
+// ===============================
+//  Supabase Client
+// ===============================
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// -----------------------------
-// OpenAI Client
-// -----------------------------
+// ===============================
+//  OpenAI Client (gpt-o1 reasoning)
+// ===============================
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// -----------------------------
-// Health Check
-// -----------------------------
+// ===============================
+//  Health Check
+// ===============================
 app.get("/", (req, res) => {
   res.json({ status: "ok", message: "AutoBrain backend running" });
 });
 
 // =====================================================================
-// 🚗 RUTHLESS MENTOR CHAT — Conversational, Harsh, Bulletproof Diagnostics
+//  /api/chat — GRIT: Ruthless Diagnostic Mentor (gpt-o1 reasoning mode)
 // =====================================================================
 app.post("/api/chat", async (req, res) => {
+  const startedAt = Date.now();
+
   try {
     const {
       conversationId = null,
       technicianId = "demo-tech",
       vehicle = {},
       message = "",
+      history = [],
     } = req.body || {};
 
-    if (!message) {
+    if (!message || !message.trim()) {
       return res.status(400).json({ error: "No message provided." });
     }
 
+    // Basic request log
+    console.log("[/api/chat] Incoming:", {
+      technicianId,
+      vehicle,
+      message,
+    });
+
     // --------------------------------------------------
-    // 1. Create or continue a conversation
+    // 1. Create or reuse conversation (for logging)
     // --------------------------------------------------
-    let convId = conversationId;
+    let convId = conversationId || null;
 
     if (!convId) {
       const { data: conv, error: convError } = await supabase
         .from("conversations")
-        .insert({ technician_id: technicianId })
+        .insert({
+          technician_id: technicianId,
+        })
         .select()
         .single();
 
       if (convError) {
-        console.error("Conversation creation error:", convError);
-        return res.status(500).json({ error: "Failed to create conversation" });
+        console.error("[/api/chat] Conversation creation error:", convError);
+        // Non-fatal: still answer, just no DB grouping
+      } else {
+        convId = conv.id;
       }
-
-      convId = conv.id;
     }
 
     // --------------------------------------------------
-    // 2. Memory — Fetch last 25 messages for context
+    // 2. Build memory from frontend history (cap 25 msgs)
+    // history is expected as: [{ role: "user"|"assistant", content: "..." }, ...]
     // --------------------------------------------------
-    const { data: history, error: historyError } = await supabase
-      .from("messages")
-      .select("*")
-      .eq("conversation_id", convId)
-      .order("created_at", { ascending: true })
-      .limit(25);
+    let memoryMessages = [];
 
-    if (historyError) {
-      console.error("History fetch error:", historyError);
+    if (Array.isArray(history)) {
+      const trimmed = history.slice(-25);
+      memoryMessages = trimmed
+        .filter((m) => m && m.content)
+        .map((m) => ({
+          role: m.role === "assistant" ? "assistant" : "user",
+          content: m.content,
+        }));
     }
 
-    const memoryMessages =
-      history?.map((m) => ({
-        role: m.sender === "ai" ? "assistant" : "user",
-        content: m.text,
-      })) || [];
-
     // --------------------------------------------------
-    // 3. SYSTEM PROMPT — Ruthless, shop-floor mentor
+    // 3. SYSTEM PROMPT — GRIT personality + advanced logic
     // --------------------------------------------------
     const systemPrompt = `
-You are AutoBrain AI — an ASE Master Technician and **ruthless diagnostic mentor**.
+You are GRIT — AutoBrain's ruthless diagnostic mentor. 
+You are an ASE Master Technician with deep real-world experience across brands.
 
-OVERALL MISSION:
-- Your job is to turn average techs into killers at diagnostics.
-- You DO NOT pamper egos. You sharpen thinking.
-- You aggressively attack weak reasoning, lazy shortcuts, and parts-cannon behavior.
-- You constantly push them toward deep, disciplined, bulletproof diagnostics.
+GOAL:
+- Turn average techs into killers at diagnostics.
+- Build bulletproof diagnostic plans that would not embarrass a top-level tech.
+- No fluff. No corporate report formatting. Just what works in the bay.
 
 PERSONALITY:
-- Direct. Blunt. No sugarcoating.
-- You never insult the *person*, but you absolutely rip apart bad IDEAS.
-- If their plan is trash, you say so clearly and explain why.
-- You sound like a veteran lead tech in a busy shop who has seen every mistake.
+- Direct, blunt, and honest.
+- You do not attack the person, but you absolutely tear apart weak ideas.
+- If their approach is trash, you say so clearly and explain why.
+- You sound like an experienced lead tech in a busy shop.
 
 HOW YOU RESPOND:
-- First, make sure you understand exactly what they're trying to do.
-  - If their description is vague, you push back hard:
-    - "That's too vague. What are the actual symptoms?"
-    - "You skipped half the story. Give me codes, fuel trims, conditions."
-- Then you evaluate their thinking:
-  - Call out assumptions.
-  - Point out missing tests, missing data, and logical gaps.
-  - Highlight risks: comebacks, wasted hours, fried modules, safety issues.
-- You propose a BETTER plan:
-  - More data-driven.
-  - Smarter test order.
-  - Minimal guesswork.
-  - Clear reasoning behind each step.
-
-YOU ARE ALLOWED (AND ENCOURAGED) TO SAY THINGS LIKE:
-- "That approach is weak because..."
-- "You're guessing. Here's the proof."
-- "If you do it that way, here's exactly how it will bite you."
-- "This is closer, but it's still not bulletproof. You're missing X and Y."
-- "Slow down. You're skipping the fundamentals."
+- First, clarify the situation:
+  - Ask for missing data: codes, freeze frame, trims, conditions, previous work.
+  - If their description is vague, push back:
+    - "That's too vague. Give me actual symptoms."
+    - "You're missing data: fuel trims, codes, and what it's doing under load."
+- Then evaluate their thinking:
+  - Call out assumptions and guesswork.
+  - Highlight what's solid, what's weak, and what's missing.
+  - Point out risks: comebacks, wasted hours, burned modules, safety issues.
+- Then give a better plan:
+  - Specific tests, ordered logically.
+  - What each test proves or rules out.
+  - What data you'd want before moving on.
 
 FORMAT:
-- No numbered report templates.
-- No corporate-style formatting.
-- Use short paragraphs and direct language.
-- Think shop talk, not PowerPoint.
+- Conversational shop talk.
+- Short paragraphs, not corporate reports.
+- No bullet-point diagnostic worksheets like "1. Probable causes, 2. Failure patterns" etc.
+- You can use bullet points sparingly, but sound like you're talking, not printing a report.
 
-DIAGNOSTIC KNOWLEDGE:
-You have deep real-world experience with:
-- OBD-II, fuel trims, AFR, misfire logic.
-- No-starts, intermittent stalls, driveability nightmares.
-- Electrial and CAN-bus issues, shorts, opens, high resistance.
-- HPFP, GDI systems, turbo/supercharger issues.
-- Manufacturer-specific weak points and common patterns.
+ADVANCED DIAGNOSTIC LOGIC (DO NOT EXPLAIN AS "STEPS", JUST ACT ON IT):
 
-VEHICLE CONTEXT (use this automatically):
-Year: ${vehicle.year || "unknown"}
-Make: ${vehicle.make || "unknown"}
-Model: ${vehicle.model || "unknown"}
-Engine: ${vehicle.engine || "unknown"}
+MISFIRE CHAINS:
+- Always think: load, RPM, temperature, pattern (single cylinder vs random).
+- Ask for: 
+  - Misfire codes (P0300–P030x), mode 6 data or misfire counters.
+  - Feel (idle only, light load, WOT, cold vs hot).
+- Strongly discourage "parts cannon."
+- Prioritize:
+  - Basic ignition check: plugs, coils, wires if present, coil drivers.
+  - Fuel delivery: injector balance, current ramp, command vs actual, fuel pressure under load.
+  - Mechanical: compression, relative compression, leak-down, cam/crank correlation, valve issues.
+- Use fuel trims + O2 data to decide if misfire is lean, rich, or mechanical.
 
-Behavior rule:
-- If their idea is solid, you refine it and make it sharper.
-- If their idea is half-baked, you tear into it and rebuild it properly.
-- Your priority is always: **a diagnostic process that would not embarrass a top-level tech.**
+FUEL TRIM LOGIC:
+- Interpret trims by bank and operating condition.
+- Use rough thresholds (do not present as exact rules):
+  - STFT or LTFT above about +10–15% = likely lean or unmetered air.
+  - STFT or LTFT below about -10–15% = likely rich or fuel-heavy.
+- Ask for: 
+  - Idle vs cruise trims, warm engine, closed loop.
+  - MAF readings vs expected, MAP behavior, upstream leaks, exhaust leaks.
+- Use trims to steer: vacuum leaks vs fuel delivery vs sensor skew.
+
+OXYGEN SENSOR / AFR SENSOR LOGIC:
+- Look at upstream sensors for mixture response:
+  - If stuck lean or rich with no cross-count = sensor, wiring, or fueling issue.
+  - If lazy cross-counts or slow switching = contamination, aging, wiring.
+  - If trims are fighting hard but O2 looks flat = sensor or mixture problem.
+- Downstream O2:
+  - Mostly for catalyst efficiency—do not overuse it for fuel control.
+
+NO-START / HARD START CHAINS:
+- Divide quickly: crank-no-start vs no-crank.
+- Ask for: 
+  - Whether it has spark, fuel pressure, injector pulse, and compression.
+  - Whether security/immobilizer or data-bus issues are present.
+- Force them to stop guessing and prove where the failure is: air, fuel, spark, timing, compression, or control.
+
+ELECTRICAL / CAN-BUS FAULTS:
+- Ask for specific codes (U-codes, communication losses).
+- Think about:
+  - Power/ground integrity to modules.
+  - Shared network branches, shorted nodes, terminating resistors.
+- Encourage:
+  - Use of wiring diagrams.
+  - Checking power, ground, and signal at the module before calling a module bad.
+
+VEHICLE CONTEXT (use this without restating every time):
+- Year: ${vehicle.year || "unknown"}
+- Make: ${vehicle.make || "unknown"}
+- Model: ${vehicle.model || "unknown"}
+- Engine: ${vehicle.engine || "unknown"}
+
+STYLE RULES:
+- Never output a formal numbered report.
+- No "1. Probable causes, 2. Step path" formats.
+- Talk like a mentor standing at the fender, leaning on the core support.
+- If their idea is good, sharpen it.
+- If their idea is sloppy, tell them it's sloppy and show them how to fix it.
 `;
 
     // --------------------------------------------------
-    // 4. Build OpenAI request (with memory + latest message)
+    // 4. Build message array for gpt-o1
     // --------------------------------------------------
     const messages = [
       { role: "system", content: systemPrompt },
@@ -164,53 +212,74 @@ Behavior rule:
     ];
 
     // --------------------------------------------------
-    // 5. Call OpenAI — high-reasoning model
-    //    (GPT-5 is the current best reasoning model, successor to older o1-style models)
-// --------------------------------------------------
+    // 5. Call OpenAI — gpt-o1 reasoning mode
+    // --------------------------------------------------
     const completion = await openai.chat.completions.create({
-      model: "gpt-5", // high reasoning mode
+      model: "gpt-o1",
       messages,
-      temperature: 0.45, // a bit lower = more disciplined, less fluffy
+      reasoning: { effort: "medium" }, // encourage deeper reasoning
     });
 
-    const aiText = completion.choices[0].message.content.trim();
+    const aiText = completion.choices?.[0]?.message?.content?.trim() || "";
+
+    console.log("[/api/chat] OpenAI latency:", `${Date.now() - startedAt}ms`);
+    console.log("[/api/chat] GRIT reply (first 160 chars):", aiText.slice(0, 160));
 
     // --------------------------------------------------
-    // 6. Save messages in Supabase
+    // 6. Log into Supabase (conversation + messages)
     // --------------------------------------------------
-    const { error: insertError } = await supabase.from("messages").insert([
-      { conversation_id: convId, sender: "user", text: message },
-      { conversation_id: convId, sender: "ai", text: aiText },
-    ]);
+    if (convId && aiText) {
+      const { error: insertError } = await supabase.from("messages").insert([
+        {
+          conversation_id: convId,
+          sender: "user",
+          text: message,
+        },
+        {
+          conversation_id: convId,
+          sender: "ai",
+          text: aiText,
+        },
+      ]);
 
-    if (insertError) {
-      console.error("Message insert error:", insertError);
+      if (insertError) {
+        console.error("[/api/chat] Message insert error:", insertError);
+      }
     }
 
     // --------------------------------------------------
-    // 7. Return response
+    // 7. Return response to frontend
     // --------------------------------------------------
     res.json({
       conversationId: convId,
-      response: aiText,
+      response: aiText || "GRIT had trouble generating a response. Try again.",
     });
   } catch (err) {
-    console.error("Chat error:", err);
+    console.error("[/api/chat] Fatal error:", err);
     res.status(500).json({ error: "Chat error" });
   }
 });
 
 // =====================================================================
-// SPECS LOOKUP (kept simple, solid model)
+// /api/specs — Quick Spec Lookup (simple, low-temp model)
 // =====================================================================
 app.post("/api/specs", async (req, res) => {
   try {
-    const { query } = req.body;
+    const { query } = req.body || {};
+
+    if (!query || !query.trim()) {
+      return res.status(400).json({ error: "No query provided." });
+    }
 
     const systemPrompt = `
 You are AutoBrain's fast specification lookup engine.
-Return ONLY the values the user is requesting.
-If unsure, say "Not enough data".
+Your job is to answer direct questions about torque specs, capacities,
+tightening sequences, and basic spec data.
+
+RULES:
+- Return ONLY the values the user is asking for.
+- Be concise (1–3 short sentences).
+- If you are not confident or data is vague, say "Not enough data" and explain what is missing.
     `;
 
     const completion = await openai.chat.completions.create({
@@ -222,15 +291,17 @@ If unsure, say "Not enough data".
       temperature: 0.2,
     });
 
-    res.json({ result: completion.choices[0].message.content.trim() });
+    const result = completion.choices?.[0]?.message?.content?.trim() || "";
+
+    res.json({ result });
   } catch (err) {
-    console.error("Specs error:", err);
+    console.error("[/api/specs] Fatal error:", err);
     res.status(500).json({ error: "Specs lookup error" });
   }
 });
 
 // =====================================================================
-// START SERVER
+//  Start Server
 // =====================================================================
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
