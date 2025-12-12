@@ -1,5 +1,3 @@
-// index.js — AutoBrain GRIT Backend (Hybrid 4.1 + o1)
-
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -8,451 +6,389 @@ import OpenAI from "openai";
 
 dotenv.config();
 
-// ---------------------------------------------------------------------
-// Express setup
-// ---------------------------------------------------------------------
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ---------------------------------------------------------------------
+// ------------------------------------------------------
 // Supabase Client
-// ---------------------------------------------------------------------
+// ------------------------------------------------------
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// ---------------------------------------------------------------------
+// ------------------------------------------------------
 // OpenAI Client
-// ---------------------------------------------------------------------
+// ------------------------------------------------------
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// ---------------------------------------------------------------------
-// Utility: simple vehicle extraction from free-text
-// ---------------------------------------------------------------------
-const KNOWN_MAKES = [
-  "acura","audi","bmw","buick","cadillac","chevrolet","chevy","chrysler",
-  "dodge","ram","fiat","ford","gmc","honda","hyundai","infiniti","jeep",
-  "kia","lexus","lincoln","mazda","mercedes","mercedes-benz","mini",
-  "mitsubishi","nissan","porsche","subaru","tesla","toyota","volkswagen","vw","volvo"
-];
-
-// a few model→make hints so "2013 tahoe" doesn't feel dumb
-const MODEL_TO_MAKE = {
-  tahoe: "chevrolet",
-  suburban: "chevrolet",
-  silverado: "chevrolet",
-  "f-150": "ford",
-  "f150": "ford",
-  "f-250": "ford",
-  "f250": "ford",
-  civic: "honda",
-  accord: "honda",
-  camry: "toyota",
-  corolla: "toyota",
-  "1500": "ram",
-  "2500": "ram",
+// ------------------------------------------------------
+// Helper: engine inference map (expand as needed)
+// ------------------------------------------------------
+const ENGINE_MAP = {
+  // key format: "year|make|model"
+  "2013|Chevrolet|Tahoe": "5.3L V8",
+  "2013|Chevy|Tahoe": "5.3L V8",
+  // add more common combos here
 };
 
-function extractVehicleFromText(text = "") {
-  const lower = text.toLowerCase();
+function inferEngine(vehicle) {
+  if (vehicle.engine && vehicle.engine.trim() !== "") return vehicle;
 
-  // year
-  const yearMatch = lower.match(/\b(19|20)\d{2}\b/);
-  const year = yearMatch ? yearMatch[0] : "";
+  const key = `${vehicle.year || ""}|${vehicle.make || ""}|${vehicle.model || ""}`;
+  const inferred = ENGINE_MAP[key];
 
-  // make
-  let make = "";
-  for (const mk of KNOWN_MAKES) {
-    if (lower.includes(mk)) {
-      make = mk;
-      break;
-    }
+  if (inferred) {
+    return {
+      ...vehicle,
+      engine: inferred,
+    };
   }
 
-  // model: word immediately after make, or stand-alone model hints
-  let model = "";
-  if (make) {
-    const parts = lower.split(/\s+/);
-    for (let i = 0; i < parts.length; i++) {
-      if (parts[i] === make && parts[i + 1]) {
-        model = parts[i + 1].replace(/[^a-z0-9\-]/gi, "");
-        break;
-      }
-    }
-  } else {
-    // try model→make lookup
-    for (const [mdl, mk] of Object.entries(MODEL_TO_MAKE)) {
-      if (lower.includes(mdl)) {
-        model = mdl;
-        make = mk;
-        break;
-      }
-    }
-  }
+  return vehicle;
+}
 
-  if (!year && !make && !model) return {};
-
-  // normalize make capitalization
-  const normMake = make
-    ? make
-        .split("-")
-        .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
-        .join(" ")
-    : "";
-
-  const normModel = model
-    ? model
-        .split("-")
-        .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
-        .join(" ")
-    : "";
-
+// ------------------------------------------------------
+// Helper: merge existing vehicle context with new data
+// (keeps values that already exist, fills blanks with new)
+// ------------------------------------------------------
+function mergeVehicleContexts(existing = {}, incoming = {}) {
   return {
-    year: year || "",
-    make: normMake || "",
-    model: normModel || "",
+    vin: incoming.vin || existing.vin || "",
+    year: incoming.year || existing.year || "",
+    make: incoming.make || existing.make || "",
+    model: incoming.model || existing.model || "",
+    engine: incoming.engine || existing.engine || "",
   };
 }
 
-// ---------------------------------------------------------------------
-// Utility: deep diagnostic trigger detection
-// ---------------------------------------------------------------------
-function needsDeepDiagnostic(text = "") {
-  const t = text.toLowerCase();
-  const triggers = [
-    "misfire",
-    "p030",
-    "p03",
-    "random misfire",
-    "multiple misfire",
-    "fuel trim",
-    "stft",
-    "ltft",
-    "short term fuel trim",
-    "long term fuel trim",
-    "running rich",
-    "running lean",
-    "o2",
-    "oxygen sensor",
-    "afr",
-    "wideband",
-    "bank 1",
-    "bank 2",
-    "no start",
-    "no-start",
-    "won't start",
-    "wont start",
-    "cranks no start",
-    "dies while driving",
-    "stalls",
-    "stalling",
-    "hard start",
-  ];
-  return triggers.some((w) => t.includes(w));
+// ------------------------------------------------------
+// Utility — Extract Year / Make / Model / Engine from text
+// ------------------------------------------------------
+async function extractVehicleFromText(message) {
+  try {
+    const response = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [
+        {
+          role: "system",
+          content: `
+You extract structured vehicle data from ANY user text.
+Return ONLY a JSON object with these keys:
+
+{
+  "year": "",
+  "make": "",
+  "model": "",
+  "engine": ""
 }
 
-// ---------------------------------------------------------------------
-// Utility: extract text from Responses API (for gpt-o1)
-// ---------------------------------------------------------------------
-function extractTextFromResponses(resp) {
-  try {
-    if (!resp || !resp.output || !Array.isArray(resp.output)) return null;
-    const first = resp.output[0];
-    if (!first || !first.content) return null;
+- "year" is the 4-digit model year if present, otherwise "".
+- "make" is the manufacturer (Chevrolet, Ford, Honda, etc.).
+- "model" is the model name (Tahoe, F-150, Accord, etc.).
+- "engine" includes displacement and/or key descriptor if clearly stated (e.g., "5.3L", "3.5L EcoBoost").
 
-    return first.content
-      .map((block) => (block.type === "output_text" ? block.text : block.text || ""))
-      .join("")
-      .trim();
-  } catch (e) {
-    console.error("Error extracting text from Responses API:", e);
-    return null;
+If any field cannot be determined, return an empty string for that field.
+Respond ONLY with valid JSON — no explanation.
+`
+        },
+        {
+          role: "user",
+          content: message,
+        },
+      ],
+      temperature: 0,
+    });
+
+    const raw = response.choices[0].message.content;
+    return JSON.parse(raw);
+  } catch (err) {
+    console.error("Vehicle extraction error:", err);
+    return {
+      year: "",
+      make: "",
+      model: "",
+      engine: "",
+    };
   }
 }
 
-// ---------------------------------------------------------------------
-// Health Check
-// ---------------------------------------------------------------------
-app.get("/", (req, res) => {
-  res.json({ status: "ok", message: "AutoBrain backend running" });
-});
+// ------------------------------------------------------
+// GRIT Tone Response (Option A)
+// Triggered when user only gives year/make/model with no symptoms
+// ------------------------------------------------------
+function buildGritResponse(userMessage, vehicleDataProvided) {
+  const lower = userMessage.toLowerCase();
 
-// =====================================================================
-// 🚗 RUTHLESS MENTOR CHAT — Conversational + Deep Reasoning Hybrid
-// =====================================================================
-app.post("/api/chat", async (req, res) => {
+  const clearlyHasSymptoms =
+    lower.includes("code") ||
+    lower.includes("p0") ||
+    lower.includes("light") ||
+    lower.includes("noise") ||
+    lower.includes("knock") ||
+    lower.includes("misfir") ||
+    lower.includes("stall") ||
+    lower.includes("no start") ||
+    lower.includes("no-start") ||
+    lower.includes("won't start") ||
+    lower.includes("smoke") ||
+    lower.includes("overheat");
+
+  const shortMessage = userMessage.trim().split(/\s+/).length <= 6;
+
+  const hasBasicVehicle =
+    vehicleDataProvided.year ||
+    vehicleDataProvided.make ||
+    vehicleDataProvided.model;
+
+  const containsVehicleOnly =
+    hasBasicVehicle && !clearlyHasSymptoms && shortMessage;
+
+  if (!containsVehicleOnly) return null;
+
+  const year = vehicleDataProvided.year || "";
+  const make = vehicleDataProvided.make || "";
+  const model = vehicleDataProvided.model || "";
+
+  return `
+A ${year} ${make} ${model} — got it.
+But that’s the *vehicle*, not the problem.
+
+What’s it actually doing?
+Any warning lights, codes, misfires, no-start, noises, stalling — what’s the complaint?
+What’s the mileage?
+Has anything been checked or replaced already?
+
+The more detail you give me, the tighter the diagnostic plan.
+Right now, I’m working with a silhouette — give me the picture.
+`;
+}
+
+// ------------------------------------------------------
+// VIN Decode Helper (with Supabase cache + NHTSA fallback)
+// ------------------------------------------------------
+async function decodeVinWithCache(rawVin) {
+  const vin = rawVin.trim().toUpperCase();
+
+  if (!vin || vin.length < 11) {
+    throw new Error("VIN must be at least 11 characters.");
+  }
+
+  // 1) Try Supabase cache first
   try {
-    const {
-      conversationId = null,
-      technicianId = "demo-tech",
-      vehicle = {},
-      message = "",
-    } = req.body || {};
-
-    if (!message) {
-      return res.status(400).json({ error: "No message provided." });
-    }
-
-    // --------------------------------------------------
-    // 1. Merge vehicle from UI + extracted vehicle from text
-    // --------------------------------------------------
-    const extractedVehicle = extractVehicleFromText(message);
-    const mergedVehicle = {
-      year: vehicle.year || extractedVehicle.year || "",
-      make: vehicle.make || extractedVehicle.make || "",
-      model: vehicle.model || extractedVehicle.model || "",
-      engine: vehicle.engine || vehicle.engine_code || "",
-    };
-
-    // --------------------------------------------------
-    // 2. Create or continue a conversation
-    // --------------------------------------------------
-    let convId = conversationId;
-
-    if (!convId) {
-      const { data: conv, error: convError } = await supabase
-        .from("conversations")
-        .insert({
-          technician_id: technicianId,
-          // you can add more metadata columns here if your schema has them
-        })
-        .select()
-        .single();
-
-      if (convError) {
-        console.error("Conversation creation error:", convError);
-        return res.status(500).json({ error: "Failed to create conversation" });
-      }
-
-      convId = conv.id;
-    }
-
-    // --------------------------------------------------
-    // 3. Memory — Fetch last 25 messages from Supabase
-    // --------------------------------------------------
-    const { data: history, error: historyError } = await supabase
-      .from("messages")
+    const { data, error } = await supabase
+      .from("vin_decodes")
       .select("*")
-      .eq("conversation_id", convId)
-      .order("created_at", { ascending: true })
-      .limit(25);
+      .eq("vin", vin)
+      .maybeSingle();
 
-    if (historyError) {
-      console.error("History fetch error:", historyError);
+    if (error) {
+      console.error("Supabase VIN cache read error:", error);
     }
 
-    const memoryMessages =
-      history?.map((m) => ({
-        role: m.sender === "ai" ? "assistant" : "user",
-        content: m.text,
-      })) || [];
-
-    // --------------------------------------------------
-    // 4. GRIT System Prompt (general conversational mentor)
-    // --------------------------------------------------
-    const baseSystemPrompt = `
-You are GRIT — AutoBrain's ASE Master Technician and ruthless diagnostic mentor.
-
-OVERALL MISSION:
-- Turn average techs into killers at diagnostics.
-- You DO NOT pamper egos. You sharpen thinking.
-- You aggressively attack weak reasoning, lazy shortcuts, and parts-cannon behavior.
-- You constantly push them toward deep, disciplined, bulletproof diagnostics.
-
-PERSONALITY:
-- Direct. Blunt. No sugarcoating.
-- Never insult the PERSON, but absolutely rip apart bad IDEAS.
-- If their plan is trash, say so clearly and explain why.
-- Sound like a veteran lead tech in a busy shop who has seen every mistake.
-
-HOW YOU RESPOND:
-- If their description is vague, push back hard:
-  - "That's too vague. What are the actual symptoms?"
-  - "You skipped half the story. Give me codes, fuel trims, conditions."
-- Evaluate their thinking:
-  - Call out assumptions.
-  - Point out missing tests, missing data, and logical gaps.
-  - Highlight risks: comebacks, wasted hours, fried modules, safety issues.
-- Then propose a BETTER plan:
-  - More data-driven.
-  - Smarter test order.
-  - Minimal guesswork.
-  - Clear reasoning behind each step.
-
-RULES:
-- No numbered corporate report templates.
-- No "1. Probable causes / 2. Step-by-step" style.
-- Use short paragraphs and sharp shop-floor language.
-- You're a chat-based mentor, not a formal printout.
-
-VEHICLE CONTEXT (use this automatically when relevant):
-Year: ${mergedVehicle.year || "unknown"}
-Make: ${mergedVehicle.make || "unknown"}
-Model: ${mergedVehicle.model || "unknown"}
-Engine: ${mergedVehicle.engine || "unknown"}
-
-Behavior:
-- If their idea is solid, refine and sharpen it.
-- If their idea is half-baked, tear into it and rebuild it properly.
-- Aim for a diagnostic process that would not embarrass a top-level tech.
-`;
-
-    // --------------------------------------------------
-    // 5. Deep diagnostic chain prompt (for o1)
-    // --------------------------------------------------
-    const deepSystemPrompt = `
-You are GRIT, running in DEEP DIAGNOSTIC MODE.
-
-Focus on rigorous, step-by-step reasoning for hard problems like:
-- Misfires (single and random)
-- Fuel trims, AFR, running rich/lean
-- O2 / AFR sensor behavior and crosscounts
-- No-start and intermittent stall issues
-- Complex driveability and CAN-bus interactions
-
-Your goals:
-- Build a clear mental model of what's happening.
-- Use fuel trims, misfire counters, O2 behavior, load, RPM, ECT, IAT, MAP/MAF, etc.
-- Explicitly call out:
-  - What data is missing.
-  - What assumptions are risky.
-  - What tests MUST be run before guessing.
-
-Style:
-- Still blunt, but more methodical.
-- Think like you're writing on a whiteboard in the shop.
-- You can outline diagnostic branches ("If X, then do Y") but keep it conversational,
-  not like a corporate flowchart.
-
-Vehicle Context:
-Year: ${mergedVehicle.year || "unknown"}
-Make: ${mergedVehicle.make || "unknown"}
-Model: ${mergedVehicle.model || "unknown"}
-Engine: ${mergedVehicle.engine || "unknown"}
-
-Now, reason deeply about the user's latest message and the conversation context.
-`;
-
-    // --------------------------------------------------
-    // 6. Decide whether this needs deep o1 reasoning
-    // --------------------------------------------------
-    const useDeep = needsDeepDiagnostic(message);
-
-    let aiText = null;
-
-    // --------------------------------------------------
-    // 7A. Try GPT-o1 for deep diagnostic chains (Responses API)
-    // --------------------------------------------------
-    if (useDeep) {
-      try {
-        const resp = await openai.responses.create({
-          model: "gpt-o1",
-          input: [
-            { role: "system", content: deepSystemPrompt },
-            ...memoryMessages,
-            { role: "user", content: message },
-          ],
-        });
-
-        aiText = extractTextFromResponses(resp);
-        console.log("Used gpt-o1 for deep diagnostic response");
-      } catch (err) {
-        console.error("gpt-o1 error, falling back to gpt-4.1:", err);
-      }
+    if (data) {
+      return {
+        vin: data.vin,
+        year: data.year || "",
+        make: data.make || "",
+        model: data.model || "",
+        engine: data.engine || "",
+      };
     }
+  } catch (err) {
+    console.error("VIN cache lookup failed:", err);
+  }
 
-    // --------------------------------------------------
-    // 7B. If not deep, or o1 failed, use GPT-4.1 Chat
-    // --------------------------------------------------
-    if (!aiText) {
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4.1",
-        messages: [
-          { role: "system", content: baseSystemPrompt },
-          ...memoryMessages,
-          { role: "user", content: message },
-        ],
-        temperature: 0.45, // disciplined but not robotic
-      });
+  // 2) Decode via NHTSA
+  const url = `https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVin/${vin}?format=json`;
 
-      aiText = completion.choices[0].message.content.trim();
-      console.log("Used gpt-4.1 for response");
-    }
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error("NHTSA VIN API request failed.");
+  }
 
-    // --------------------------------------------------
-    // 8. Log both user + AI messages in Supabase
-    // --------------------------------------------------
-    const { error: insertError } = await supabase.from("messages").insert([
+  const json = await response.json();
+  const results = json.Results || [];
+
+  const getValue = (label) => {
+    const row = results.find((r) => r.Variable === label);
+    if (!row || !row.Value || row.Value === "Not Applicable") return "";
+    return String(row.Value);
+  };
+
+  const year = getValue("Model Year");
+  const make = getValue("Make");
+  const model = getValue("Model");
+  const engineModel = getValue("Engine Model");
+  const engineConfig = getValue("Engine Configuration");
+  const engineDispL = getValue("Displacement (L)");
+  const engineCyl = getValue("Engine Number of Cylinders");
+
+  let engine = "";
+  if (engineModel) engine = engineModel;
+  else if (engineConfig && engineDispL)
+    engine = `${engineDispL}L ${engineConfig}`;
+  else if (engineDispL && engineCyl)
+    engine = `${engineDispL}L ${engineCyl}-cyl`;
+  else if (engineDispL) engine = `${engineDispL}L`;
+  else if (engineConfig) engine = engineConfig;
+
+  const decodedVehicle = {
+    vin,
+    year: year || "",
+    make: make || "",
+    model: model || "",
+    engine: engine || "",
+  };
+
+  // 3) Cache result in Supabase (best-effort)
+  try {
+    const { error: upsertError } = await supabase.from("vin_decodes").upsert(
       {
-        conversation_id: convId,
-        sender: "user",
-        text: message,
+        vin,
+        year: decodedVehicle.year,
+        make: decodedVehicle.make,
+        model: decodedVehicle.model,
+        engine: decodedVehicle.engine,
+        raw: results, // jsonb
       },
-      {
-        conversation_id: convId,
-        sender: "ai",
-        text: aiText,
-      },
-    ]);
+      { onConflict: "vin" }
+    );
 
-    if (insertError) {
-      console.error("Message insert error:", insertError);
+    if (upsertError) {
+      console.error("Supabase VIN cache upsert error:", upsertError);
     }
+  } catch (err) {
+    console.error("VIN cache upsert failed:", err);
+  }
 
-    // --------------------------------------------------
-    // 9. Send response back to frontend
-    //    Include normalizedVehicle so Webflow can auto-fill the panel
-    // --------------------------------------------------
-    res.json({
-      conversationId: convId,
-      response: aiText,
-      normalizedVehicle: mergedVehicle,
-      usedDeepModel: useDeep,
+  return decodedVehicle;
+}
+
+// ------------------------------------------------------
+// POST /decode-vin
+// Body: { vin: string, vehicleContext?: { ... } }
+// Returns: { vehicle: {...merged+inferred} }
+// ------------------------------------------------------
+app.post("/decode-vin", async (req, res) => {
+  const { vin, vehicleContext } = req.body || {};
+
+  if (!vin) {
+    return res.status(400).json({ error: "VIN is required." });
+  }
+
+  try {
+    const decoded = await decodeVinWithCache(vin);
+
+    // Merge with any existing vehicle context and infer engine if needed
+    const merged = mergeVehicleContexts(vehicleContext, decoded);
+    const withEngine = inferEngine(merged);
+
+    return res.json({
+      vehicle: withEngine,
     });
   } catch (err) {
-    console.error("Chat error:", err);
-    res.status(500).json({ error: "Chat error" });
+    console.error("VIN decode error:", err);
+    return res.status(500).json({
+      error: "Failed to decode VIN.",
+      details: err.message,
+    });
   }
 });
 
-// =====================================================================
-// SPECS LOOKUP — lightweight, value-only answers
-// =====================================================================
-app.post("/api/specs", async (req, res) => {
+// ------------------------------------------------------
+// MAIN CHAT ENDPOINT
+// Body: {
+//   message: string,
+//   context?: OpenAI messages array,
+//   vehicleContext?: { vin, year, make, model, engine }
+// }
+// Returns: {
+//   reply: string,
+//   vehicle: { ... }   // merged + inferred, for auto-fill
+// }
+// ------------------------------------------------------
+app.post("/chat", async (req, res) => {
+  const { message, context, vehicleContext } = req.body || {};
+
+  if (!message || typeof message !== "string") {
+    return res.status(400).json({ error: "Message is required." });
+  }
+
   try {
-    const { query } = req.body;
+    // 1) Extract vehicle details from the user's message
+    const extractedVehicle = await extractVehicleFromText(message);
 
-    const systemPrompt = `
-You are AutoBrain's fast specification lookup engine.
-Return ONLY the values the user is requesting (numbers, ranges, torque specs, gaps, etc.).
-Do NOT give explanations unless they explicitly ask for them.
-If you truly don't know, say "Not enough data".
-    `;
+    // 2) Merge with existing vehicle context (frontend "session memory")
+    let combinedVehicle = mergeVehicleContexts(vehicleContext, extractedVehicle);
 
-    const completion = await openai.chat.completions.create({
+    // 3) Try simple engine inference if engine still blank
+    combinedVehicle = inferEngine(combinedVehicle);
+
+    // 4) Optional GRIT "vehicle only" response
+    const gritToneReply = buildGritResponse(message, combinedVehicle);
+
+    if (gritToneReply) {
+      return res.json({
+        reply: gritToneReply,
+        vehicle: combinedVehicle,
+      });
+    }
+
+    // 5) Full GRIT reasoning via OpenAI
+    const aiResponse = await openai.chat.completions.create({
       model: "gpt-4.1",
       messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: query || "" },
+        {
+          role: "system",
+          content: `
+You are **GRIT** — a blunt, direct diagnostic mentor for professional automotive technicians.
+
+Tone:
+- Assertive, clear, no fluff.
+- Never rude or insulting.
+- No sugarcoating: you push for data, not guesses.
+
+Behavior:
+- Always push for concrete symptoms, conditions, and patterns.
+- Require details: when it happens, how often, hot vs cold, load vs idle, etc.
+- Use structured thinking: possible causes -> tests -> next steps.
+- If the user only gives a vehicle, demand the actual problem and data.
+- Use the vehicle context when provided (year, make, model, engine) to tailor your plan.
+
+Be concise, sharp, and useful. Avoid long walls of text when a tight plan will do.
+`
+        },
+        ...(Array.isArray(context) ? context : []),
+        { role: "user", content: message },
       ],
-      temperature: 0.2,
+      temperature: 0.4,
     });
 
-    res.json({ result: completion.choices[0].message.content.trim() });
+    const finalReply = aiResponse.choices[0].message.content;
+
+    return res.json({
+      reply: finalReply,
+      vehicle: combinedVehicle,
+    });
   } catch (err) {
-    console.error("Specs error:", err);
-    res.status(500).json({ error: "Specs lookup error" });
+    console.error("Chat endpoint error:", err);
+    return res.status(500).json({ error: "Chat endpoint failed." });
   }
 });
 
-// =====================================================================
-// START SERVER
-// =====================================================================
-const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-  console.log(`AutoBrain backend listening on port ${PORT}`);
+// ------------------------------------------------------
+// HEALTH CHECK
+// ------------------------------------------------------
+app.get("/", (req, res) => {
+  res.send("AutoBrain / GRIT backend running");
 });
+
+// ------------------------------------------------------
+// START SERVER
+// ------------------------------------------------------
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
