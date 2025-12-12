@@ -5,14 +5,14 @@
 // - Engine Code Classification (GM RPO -> Gen IV/V, AFM, DI)
 // - Chat Endpoint
 // - Diagnostic Tree Endpoint
-// - Feedback Email Endpoint
+// - Feedback Email Endpoint (RESEND VERSION - RELIABLE)
 // ===========================================================
 
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 import { createClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
 
@@ -38,6 +38,11 @@ const openai = new OpenAI({
 });
 
 // ------------------------------------------------------
+// Resend Email Client
+// ------------------------------------------------------
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+// ------------------------------------------------------
 // ENGINE MAP (Simple inference if engine missing)
 // ------------------------------------------------------
 const ENGINE_MAP = {
@@ -46,7 +51,7 @@ const ENGINE_MAP = {
 };
 
 // ------------------------------------------------------
-// GM ENGINE CLASSIFICATION LOGIC (RPO decoding)
+// GM ENGINE CLASSIFICATION LOGIC
 // ------------------------------------------------------
 function classifyGMEngine(engineModelRaw, displacementLRaw) {
   if (!engineModelRaw) return null;
@@ -129,10 +134,10 @@ function classifyGMEngine(engineModelRaw, displacementLRaw) {
 // ENGINE STRING INFERENCE
 // ------------------------------------------------------
 function inferEngineStringFromYMM(vehicle) {
-  if (vehicle.engine && vehicle.engine.trim() !== "") return vehicle.engine;
+  if (vehicle.engine) return vehicle.engine;
 
   const key = `${vehicle.year}|${vehicle.make}|${vehicle.model}`;
-  return ENGINE_MAP[key] || vehicle.engine || "";
+  return ENGINE_MAP[key] || "";
 }
 
 // ------------------------------------------------------
@@ -153,7 +158,7 @@ function mergeVehicleContexts(existing = {}, incoming = {}) {
 }
 
 // ------------------------------------------------------
-// Extract YMM from message
+// Extract YMM from user text
 // ------------------------------------------------------
 async function extractVehicleFromText(message) {
   try {
@@ -166,58 +171,56 @@ async function extractVehicleFromText(message) {
           content: `
 Extract ONLY this JSON:
 { "year": "", "make": "", "model": "", "engine": "" }
-Unknown fields -> empty string.`
+Unknown -> empty string.`
         },
         { role: "user", content: message }
       ]
     });
 
     return JSON.parse(resp.choices[0].message.content);
-  } catch (err) {
+  } catch {
     return { year: "", make: "", model: "", engine: "" };
   }
 }
 
 // ------------------------------------------------------
-// SHORT VEHICLE-ONLY GRIT RESPONSE
+// GRIT SHORT RESPONSE
 // ------------------------------------------------------
-function buildGritResponse(userMessage, v) {
-  const lower = userMessage.toLowerCase();
+function buildGritResponse(msg, v) {
+  const lower = msg.toLowerCase();
 
   const hasSymptoms =
     lower.includes("code") ||
     lower.includes("p0") ||
-    lower.includes("knock") ||
-    lower.includes("noise") ||
     lower.includes("misfir") ||
-    lower.includes("stall") ||
+    lower.includes("noise") ||
     lower.includes("overheat") ||
-    lower.includes("no start") ||
-    lower.includes("smoke");
+    lower.includes("stall") ||
+    lower.includes("no start");
 
-  const short = userMessage.trim().split(/\s+/).length <= 6;
+  const short = msg.trim().split(/\s+/).length <= 6;
 
   if (!short || hasSymptoms || !(v.year || v.make || v.model)) return null;
 
   return `
-A ${v.year} ${v.make} ${v.model} — got it.
-But that’s the vehicle, not the complaint.
+A ${v.year} ${v.make} ${v.model}. Noted.
+But what's it *doing*?
 
-What’s it actually doing?
-Codes? Misfires? No-start? Noise? Overheating?
-Mileage?
-Anything replaced already?
+Codes?
+Misfires?
+No-start?
+Noises?
+Overheating?
 
-Need the symptoms to build the plan.`;
+Give symptoms and mileage so I can build a real diagnostic plan.`;
 }
 
 // ------------------------------------------------------
-// VIN DECODE (Supabase Cache + NHTSA)
+// VIN DECODE
 // ------------------------------------------------------
 async function decodeVinWithCache(vinRaw) {
   const vin = vinRaw.trim().toUpperCase();
 
-  // 1) Cache
   const { data } = await supabase
     .from("vin_decodes")
     .select("*")
@@ -231,35 +234,32 @@ async function decodeVinWithCache(vinRaw) {
       make: data.make,
       model: data.model,
       engine: data.engine,
-      engineDetails: data.engine_details || {}
+      engineDetails: data.engine_details
     };
   }
 
-  // 2) NHTSA
-  const response = await fetch(
+  const resp = await fetch(
     `https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVin/${vin}?format=json`
   );
-  const json = await response.json();
+  const json = await resp.json();
   const results = json.Results;
 
-  const getVal = (label) => {
+  const get = (label) => {
     const row = results.find((r) => r.Variable === label);
     return row?.Value && row.Value !== "Not Applicable" ? row.Value : "";
   };
 
-  const year = getVal("Model Year");
-  const make = getVal("Make");
-  const model = getVal("Model");
-  const engineModel = getVal("Engine Model");
-  const disp = getVal("Displacement (L)");
+  const year = get("Model Year");
+  const make = get("Make");
+  const model = get("Model");
+  const engineModel = get("Engine Model");
+  const disp = get("Displacement (L)");
 
   const engineDetails = classifyGMEngine(engineModel, disp);
 
   let engineString = "";
-  if (engineDetails && engineDetails.code) {
-    const tagAFM = engineDetails.has_afm ? "AFM" : "";
-    const tagDI = engineDetails.is_direct_injected ? "DI" : "";
-    engineString = `${engineDetails.displacement_l}L ${engineDetails.code} ${tagAFM} ${tagDI}`.trim();
+  if (engineDetails?.code) {
+    engineString = `${engineDetails.displacement_l}L ${engineDetails.code} ${engineDetails.has_afm ? "AFM" : ""} ${engineDetails.is_direct_injected ? "DI" : ""}`.trim();
   } else {
     engineString = engineModel || disp || "";
   }
@@ -295,7 +295,7 @@ app.post("/decode-vin", async (req, res) => {
     let merged = mergeVehicleContexts(req.body.vehicleContext, decoded);
     merged.engine = inferEngineStringFromYMM(merged);
     res.json({ vehicle: merged });
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: "VIN decode error" });
   }
 });
@@ -311,9 +311,9 @@ app.post("/chat", async (req, res) => {
     let mergedVehicle = mergeVehicleContexts(vehicleContext, extracted);
     mergedVehicle.engine = inferEngineStringFromYMM(mergedVehicle);
 
-    const gritReply = buildGritResponse(message, mergedVehicle);
-    if (gritReply) {
-      return res.json({ reply: gritReply, vehicle: mergedVehicle });
+    const quick = buildGritResponse(message, mergedVehicle);
+    if (quick) {
+      return res.json({ reply: quick, vehicle: mergedVehicle });
     }
 
     const ai = await openai.chat.completions.create({
@@ -323,13 +323,13 @@ app.post("/chat", async (req, res) => {
         {
           role: "system",
           content: `
-You are GRIT — blunt, no-fluff diagnostic mentor.
-Use engineDetails aggressively to modify diagnostic priority.
-`
+You are GRIT — ruthless diagnostic mentor.
+Use engineDetails to modify diagnosis (AFM, DI, Gen V, etc).
+No fluff. Crisp instructions only.`
         },
         {
           role: "system",
-          content: `Vehicle context: ${JSON.stringify(mergedVehicle)}`
+          content: `Vehicle: ${JSON.stringify(mergedVehicle)}`
         },
         ...(context || []),
         { role: "user", content: message }
@@ -356,9 +356,7 @@ app.post("/diagnostic-tree", async (req, res) => {
     mergedVehicle.engine = inferEngineStringFromYMM(mergedVehicle);
 
     const systemPrompt = `
-You are GRIT — structured diagnostic engine.
 Return ONLY valid JSON:
-
 {
   "symptom_summary": "",
   "likely_causes": [
@@ -372,65 +370,62 @@ Return ONLY valid JSON:
   ],
   "red_flags": [],
   "recommended_next_steps": []
-}
-`;
+}`;
 
     const ai = await openai.chat.completions.create({
       model: "gpt-4.1",
-      temperature: 0.3,
+      temperature: 0.2,
       messages: [
         { role: "system", content: systemPrompt },
         {
           role: "system",
-          content: `Vehicle context: ${JSON.stringify(mergedVehicle)}`
+          content: `Vehicle: ${JSON.stringify(mergedVehicle)}`
         },
         { role: "user", content: message }
       ]
     });
 
-    let tree;
+    let json;
     try {
-      tree = JSON.parse(ai.choices[0].message.content);
+      json = JSON.parse(ai.choices[0].message.content);
     } catch {
       return res.status(500).json({
-        error: "Invalid diagnostic JSON",
+        error: "Invalid JSON",
         raw: ai.choices[0].message.content
       });
     }
 
-    res.json({ vehicle: mergedVehicle, tree });
-  } catch (err) {
+    res.json({ vehicle: mergedVehicle, tree: json });
+  } catch {
     res.status(500).json({ error: "Diagnostic tree error" });
   }
 });
 
 // ------------------------------------------------------
-// POST /send-feedback (email to support)
+// POST /send-feedback (RESEND EMAIL)
 // ------------------------------------------------------
 app.post("/send-feedback", async (req, res) => {
-  const { feedback } = req.body;
-
-  if (!feedback) return res.status(400).json({ error: "Feedback required" });
-
   try {
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: {
-        user: process.env.SUPPORT_EMAIL,
-        pass: process.env.SUPPORT_EMAIL_PASS
-      }
-    });
+    const { feedback } = req.body;
 
-    await transporter.sendMail({
-      from: process.env.SUPPORT_EMAIL,
+    if (!feedback || feedback.trim() === "") {
+      return res.status(400).json({ error: "Feedback required" });
+    }
+
+    await resend.emails.send({
+      from: "AutoBrain Feedback <feedback@autobrain-ai.com>",
       to: "support@autobrain-ai.com",
-      subject: "Technician Feedback — AutoBrain GRIT",
-      text: feedback
+      subject: "New AutoBrain GRIT Feedback",
+      html: `
+        <h2>Technician Feedback Submitted</h2>
+        <p>${feedback.replace(/\n/g, "<br>")}</p>
+      `
     });
 
     res.json({ status: "ok" });
   } catch (err) {
-    res.status(500).json({ status: "error", details: err.message });
+    console.error("Feedback error:", err);
+    res.status(500).json({ error: "Email send failed" });
   }
 });
 
