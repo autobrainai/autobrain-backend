@@ -1,7 +1,18 @@
+// ===========================================================
+// AUTO BRAIN — GRIT BACKEND (FINAL UPDATED VERSION)
+// Includes:
+// - VIN Decoding + Supabase Cache
+// - Engine Code Classification (GM RPO -> Gen IV/V, AFM, DI)
+// - Chat Endpoint
+// - Diagnostic Tree Endpoint
+// - Feedback Email Endpoint
+// ===========================================================
+
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import fetch from "node-fetch"; // required for NHTSA API
+import fetch from "node-fetch";
+import nodemailer from "nodemailer";
 import { createClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
 
@@ -12,7 +23,7 @@ app.use(cors());
 app.use(express.json());
 
 // ------------------------------------------------------
-// Supabase Client
+// Supabase
 // ------------------------------------------------------
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -20,37 +31,35 @@ const supabase = createClient(
 );
 
 // ------------------------------------------------------
-// OpenAI Client
+// OpenAI
 // ------------------------------------------------------
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+  apiKey: process.env.OPENAI_API_KEY
 });
 
 // ------------------------------------------------------
-// ENGINE INFERENCE MAP (fallback based on Y/M/M only)
+// ENGINE MAP (Simple inference if engine missing)
 // ------------------------------------------------------
 const ENGINE_MAP = {
   "2013|Chevrolet|Tahoe": "5.3L V8",
-  "2013|Chevy|Tahoe": "5.3L V8",
+  "2013|Chevy|Tahoe": "5.3L V8"
 };
 
 // ------------------------------------------------------
-// GM ENGINE CLASSIFICATION FROM ENGINE MODEL (RPO)
+// GM ENGINE CLASSIFICATION LOGIC (RPO decoding)
 // ------------------------------------------------------
 function classifyGMEngine(engineModelRaw, displacementLRaw) {
   if (!engineModelRaw) return null;
 
   const code = String(engineModelRaw).trim().toUpperCase();
-  const displacementL = displacementLRaw ? String(displacementLRaw) : "";
+  const disp = displacementLRaw ? String(displacementLRaw) : "";
 
-  // Defaults
   let generation = "";
   let hasAFM = false;
-  let isDirectInjected = false;
+  let isDI = false;
   let notes = "";
 
   switch (code) {
-    // ---------------- Gen IV 5.3 AFM ----------------
     case "LC9":
     case "LH6":
     case "L59":
@@ -58,101 +67,76 @@ function classifyGMEngine(engineModelRaw, displacementLRaw) {
     case "L77":
       generation = "Gen IV";
       hasAFM = true;
-      isDirectInjected = false;
-      notes =
-        "5.3L Gen IV with Active Fuel Management. Known for AFM lifter and VLOM issues, especially on cylinders 1,4,6,7.";
+      notes = "Gen IV AFM — known AFM lifter failures, VLOM faults.";
       break;
 
-    // ---------------- Gen IV 5.3 non-AFM -------------
     case "LMG":
     case "LY5":
       generation = "Gen IV";
       hasAFM = false;
-      isDirectInjected = false;
-      notes =
-        "5.3L Gen IV non-AFM. AFM lifter failures less of a concern; focus more on ignition, fuel, and mechanical.";
+      notes = "Gen IV non-AFM — fewer AFM lifter issues.";
       break;
 
-    // ---------------- Gen V 5.3 DI AFM ---------------
     case "L83":
       generation = "Gen V";
       hasAFM = true;
-      isDirectInjected = true;
-      notes =
-        "5.3L Gen V direct-injected with AFM. Pay attention to injector balance, HPFP, carbon buildup, and AFM lifters.";
+      isDI = true;
+      notes = "Gen V DI AFM — DI injector issues, AFM lifter collapse, HPFP failures.";
       break;
 
-    // ---------------- Gen V 6.2 DI AFM ---------------
     case "L86":
     case "L94":
       generation = "Gen V";
       hasAFM = true;
-      isDirectInjected = true;
-      notes =
-        "6.2L Gen V DI with AFM. Known for AFM lifter issues, DI injector balance problems, and HPFP/low-side fuel issues.";
+      isDI = true;
+      notes = "Gen V 6.2 DI AFM — common injector balancing & AFM issues.";
       break;
 
-    // ---------------- 6.0 HD / others ----------------
     case "L96":
       generation = "Gen IV";
       hasAFM = false;
-      isDirectInjected = false;
-      notes =
-        "6.0L HD (iron block). No AFM. Common issues: ignition coils, plug wires, exhaust leaks, and work-truck abuse.";
+      notes = "6.0 HD Work Engine — common ignition & exhaust issues.";
       break;
 
     case "L92":
     case "L9H":
       generation = "Gen IV";
-      hasAFM = false;
-      isDirectInjected = false;
-      notes =
-        "6.2L Gen IV non-AFM. Focus more on ignition and mechanical checks than AFM.";
+      notes = "Gen IV 6.2 non-AFM.";
       break;
 
     default:
-      generation = "";
-      hasAFM = false;
-      isDirectInjected = false;
-      notes = "";
-      break;
-  }
-
-  if (!generation && !notes) {
-    // Unknown / unclassified engine code
-    return {
-      code,
-      generation: "",
-      displacement_l: displacementL,
-      has_afm: false,
-      is_direct_injected: false,
-      notes: "",
-    };
+      return {
+        code,
+        generation: "",
+        displacement_l: disp,
+        has_afm: false,
+        is_direct_injected: false,
+        notes: ""
+      };
   }
 
   return {
     code,
     generation,
-    displacement_l: displacementL,
+    displacement_l: disp,
     has_afm: hasAFM,
-    is_direct_injected: isDirectInjected,
-    notes,
+    is_direct_injected: isDI,
+    notes
   };
 }
 
 // ------------------------------------------------------
-// ENGINE STRING INFERENCE (using ENGINE_MAP fallback)
+// ENGINE STRING INFERENCE
 // ------------------------------------------------------
 function inferEngineStringFromYMM(vehicle) {
   if (vehicle.engine && vehicle.engine.trim() !== "") return vehicle.engine;
 
-  const key = `${vehicle.year || ""}|${vehicle.make || ""}|${vehicle.model || ""}`;
-  const inferred = ENGINE_MAP[key];
-  return inferred || vehicle.engine || "";
+  const key = `${vehicle.year}|${vehicle.make}|${vehicle.model}`;
+  return ENGINE_MAP[key] || vehicle.engine || "";
 }
 
 // ------------------------------------------------------
-// MERGE VEHICLE CONTEXT (includes engineDetails)
+// MERGE VEHICLE CONTEXT
 // ------------------------------------------------------
 function mergeVehicleContexts(existing = {}, incoming = {}) {
   return {
@@ -163,49 +147,39 @@ function mergeVehicleContexts(existing = {}, incoming = {}) {
     engine: incoming.engine || existing.engine || "",
     engineDetails: {
       ...(existing.engineDetails || {}),
-      ...(incoming.engineDetails || {}),
-    },
+      ...(incoming.engineDetails || {})
+    }
   };
 }
 
 // ------------------------------------------------------
-// EXTRACT VEHICLE DATA FROM USER TEXT
+// Extract YMM from message
 // ------------------------------------------------------
 async function extractVehicleFromText(message) {
   try {
-    const response = await openai.chat.completions.create({
+    const resp = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
+      temperature: 0,
       messages: [
         {
           role: "system",
           content: `
-Extract structured vehicle data from ANY user message.
-Return ONLY valid JSON:
-
-{
-  "year": "",
-  "make": "",
-  "model": "",
-  "engine": ""
-}
-
-Unknown fields -> empty string.
-`,
+Extract ONLY this JSON:
+{ "year": "", "make": "", "model": "", "engine": "" }
+Unknown fields -> empty string.`
         },
-        { role: "user", content: message },
-      ],
-      temperature: 0,
+        { role: "user", content: message }
+      ]
     });
 
-    return JSON.parse(response.choices[0].message.content || "{}");
+    return JSON.parse(resp.choices[0].message.content);
   } catch (err) {
-    console.error("Vehicle extraction error:", err);
     return { year: "", make: "", model: "", engine: "" };
   }
 }
 
 // ------------------------------------------------------
-// GRIT OPTION A: VEHICLE-ONLY RESPONSE
+// SHORT VEHICLE-ONLY GRIT RESPONSE
 // ------------------------------------------------------
 function buildGritResponse(userMessage, v) {
   const lower = userMessage.toLowerCase();
@@ -213,45 +187,37 @@ function buildGritResponse(userMessage, v) {
   const hasSymptoms =
     lower.includes("code") ||
     lower.includes("p0") ||
-    lower.includes("light") ||
-    lower.includes("noise") ||
     lower.includes("knock") ||
+    lower.includes("noise") ||
     lower.includes("misfir") ||
     lower.includes("stall") ||
-    lower.includes("no start") ||
-    lower.includes("won't start") ||
     lower.includes("overheat") ||
+    lower.includes("no start") ||
     lower.includes("smoke");
 
   const short = userMessage.trim().split(/\s+/).length <= 6;
-  const hasVehicle = v.year || v.make || v.model;
 
-  if (!hasVehicle || hasSymptoms || !short) return null;
+  if (!short || hasSymptoms || !(v.year || v.make || v.model)) return null;
 
   return `
 A ${v.year} ${v.make} ${v.model} — got it.
-But that’s the *vehicle*, not the problem.
+But that’s the vehicle, not the complaint.
 
 What’s it actually doing?
-Any warning lights, codes, misfires, no-start, noises, stalling — what’s the complaint?
-What’s the mileage?
-Has anything been checked or replaced already?
+Codes? Misfires? No-start? Noise? Overheating?
+Mileage?
+Anything replaced already?
 
-The more detail you give me, the tighter the diagnostic plan.
-Right now, I’m working with a silhouette — give me the picture.
-`;
+Need the symptoms to build the plan.`;
 }
 
 // ------------------------------------------------------
-// VIN DECODE WITH SUPABASE CACHE + NHTSA API
+// VIN DECODE (Supabase Cache + NHTSA)
 // ------------------------------------------------------
-async function decodeVinWithCache(rawVin) {
-  const vin = rawVin.trim().toUpperCase();
-  if (!vin || vin.length < 11) {
-    throw new Error("VIN must be at least 11 characters.");
-  }
+async function decodeVinWithCache(vinRaw) {
+  const vin = vinRaw.trim().toUpperCase();
 
-  // 1) Try cache first
+  // 1) Cache
   const { data } = await supabase
     .from("vin_decodes")
     .select("*")
@@ -261,56 +227,41 @@ async function decodeVinWithCache(rawVin) {
   if (data) {
     return {
       vin,
-      year: data.year || "",
-      make: data.make || "",
-      model: data.model || "",
-      engine: data.engine || "",
-      engineDetails: data.engine_details || {},
+      year: data.year,
+      make: data.make,
+      model: data.model,
+      engine: data.engine,
+      engineDetails: data.engine_details || {}
     };
   }
 
-  // 2) Hit NHTSA
-  const url = `https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVin/${vin}?format=json`;
-  const response = await fetch(url);
+  // 2) NHTSA
+  const response = await fetch(
+    `https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVin/${vin}?format=json`
+  );
   const json = await response.json();
-  const results = json.Results || [];
+  const results = json.Results;
 
-  const getValue = (label) => {
-    const r = results.find((e) => e.Variable === label);
-    if (!r || !r.Value || r.Value === "Not Applicable") return "";
-    return String(r.Value);
+  const getVal = (label) => {
+    const row = results.find((r) => r.Variable === label);
+    return row?.Value && row.Value !== "Not Applicable" ? row.Value : "";
   };
 
-  const year = getValue("Model Year");
-  const make = getValue("Make");
-  const model = getValue("Model");
-  const engineModel = getValue("Engine Model"); // often contains RPO like L83, L86
-  const engineDispL = getValue("Displacement (L)");
-  const engineCyl = getValue("Engine Number of Cylinders");
-  const engineConfig = getValue("Engine Configuration");
+  const year = getVal("Model Year");
+  const make = getVal("Make");
+  const model = getVal("Model");
+  const engineModel = getVal("Engine Model");
+  const disp = getVal("Displacement (L)");
 
-  // Classify GM engine if possible
-  let engineDetails = classifyGMEngine(engineModel, engineDispL);
+  const engineDetails = classifyGMEngine(engineModel, disp);
 
-  // Human-friendly engine string
   let engineString = "";
   if (engineDetails && engineDetails.code) {
-    const disp = engineDetails.displacement_l || engineDispL;
-    const diTag = engineDetails.is_direct_injected ? "DI" : "";
-    const afmTag = engineDetails.has_afm ? "AFM" : "";
-    const tags = [diTag, afmTag].filter(Boolean).join(" ");
-    engineString = `${disp || "Engine"}L ${engineDetails.code}${
-      tags ? " " + tags : ""
-    }`.trim();
+    const tagAFM = engineDetails.has_afm ? "AFM" : "";
+    const tagDI = engineDetails.is_direct_injected ? "DI" : "";
+    engineString = `${engineDetails.displacement_l}L ${engineDetails.code} ${tagAFM} ${tagDI}`.trim();
   } else {
-    // Fallback if we didn't classify
-    if (engineModel) engineString = engineModel;
-    else if (engineDispL && engineConfig)
-      engineString = `${engineDispL}L ${engineConfig}`;
-    else if (engineDispL && engineCyl)
-      engineString = `${engineDispL}L ${engineCyl}-cyl`;
-    else if (engineDispL) engineString = `${engineDispL}L`;
-    else engineString = "";
+    engineString = engineModel || disp || "";
   }
 
   const decoded = {
@@ -319,25 +270,17 @@ async function decodeVinWithCache(rawVin) {
     make,
     model,
     engine: engineString,
-    engineDetails: engineDetails || {
-      code: engineModel || "",
-      displacement_l: engineDispL || "",
-      generation: "",
-      has_afm: false,
-      is_direct_injected: false,
-      notes: "",
-    },
+    engineDetails
   };
 
-  // 3) Cache in Supabase (including engineDetails)
   await supabase.from("vin_decodes").upsert({
     vin,
     year,
     make,
     model,
-    engine: decoded.engine,
-    engine_details: decoded.engineDetails,
-    raw: results,
+    engine: engineString,
+    engine_details: engineDetails,
+    raw: results
   });
 
   return decoded;
@@ -348,98 +291,146 @@ async function decodeVinWithCache(rawVin) {
 // ------------------------------------------------------
 app.post("/decode-vin", async (req, res) => {
   try {
-    const { vin, vehicleContext } = req.body;
-
-    const decoded = await decodeVinWithCache(vin);
-
-    // Merge existing context + decoded data
-    let merged = mergeVehicleContexts(vehicleContext, decoded);
-
-    // Ensure engine string is filled if missing
+    const decoded = await decodeVinWithCache(req.body.vin);
+    let merged = mergeVehicleContexts(req.body.vehicleContext, decoded);
     merged.engine = inferEngineStringFromYMM(merged);
-
     res.json({ vehicle: merged });
   } catch (err) {
-    console.error("VIN decode error:", err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "VIN decode error" });
   }
 });
 
 // ------------------------------------------------------
-// POST /chat — MAIN GRIT ENDPOINT
+// POST /chat
 // ------------------------------------------------------
 app.post("/chat", async (req, res) => {
   try {
     const { message, context, vehicleContext } = req.body;
 
-    // Extract from free text
     const extracted = await extractVehicleFromText(message);
-
-    // Merge contexts
     let mergedVehicle = mergeVehicleContexts(vehicleContext, extracted);
-
-    // Fallback engine string if we have YMM but no engine yet
     mergedVehicle.engine = inferEngineStringFromYMM(mergedVehicle);
 
-    // Vehicle-only behavior (Option A tone)
     const gritReply = buildGritResponse(message, mergedVehicle);
-
     if (gritReply) {
-      return res.json({
-        reply: gritReply,
-        vehicle: mergedVehicle,
-      });
+      return res.json({ reply: gritReply, vehicle: mergedVehicle });
     }
 
-    // Full GRIT reasoning (now with engineDetails awareness)
-    const aiResponse = await openai.chat.completions.create({
+    const ai = await openai.chat.completions.create({
       model: "gpt-4.1",
+      temperature: 0.4,
       messages: [
         {
           role: "system",
           content: `
-You are GRIT — a blunt, direct diagnostic mentor for professional automotive technicians.
-Tone: Assertive, clear, no fluff, never rude.
-Push for data, not guesses.
-
-You receive vehicle context as JSON, which may include:
-- vin
-- year, make, model
-- engine (human-friendly)
-- engineDetails: {
-    code,              // e.g. L83, LC9, LMG, L96, etc.
-    generation,        // e.g. Gen IV, Gen V
-    displacement_l,    // e.g. 5.3
-    has_afm,           // boolean
-    is_direct_injected,// boolean
-    notes              // summary of engine characteristics / concerns
-  }
-
-Use engineDetails aggressively to:
-- Adjust your suspicion list (AFM vs non-AFM, DI vs port injection)
-- Decide what tests are highest priority
-- Call out known pattern failures (e.g. AFM lifter collapse on Gen IV, DI injector issues on Gen V, carbon buildup).
-Respond with tight, technician-focused plans: codes -> data -> tests -> next decisions.
-`,
+You are GRIT — blunt, no-fluff diagnostic mentor.
+Use engineDetails aggressively to modify diagnostic priority.
+`
         },
         {
           role: "system",
-          content: `Current vehicle context (JSON): ${JSON.stringify(
-            mergedVehicle
-          )}`,
+          content: `Vehicle context: ${JSON.stringify(mergedVehicle)}`
         },
-        ...(Array.isArray(context) ? context : []),
-        { role: "user", content: message },
-      ],
+        ...(context || []),
+        { role: "user", content: message }
+      ]
     });
 
     res.json({
-      reply: aiResponse.choices[0].message.content,
-      vehicle: mergedVehicle,
+      reply: ai.choices[0].message.content,
+      vehicle: mergedVehicle
     });
   } catch (err) {
-    console.error("Chat endpoint error:", err);
-    res.status(500).json({ error: "Chat endpoint failed" });
+    res.status(500).json({ error: "Chat error" });
+  }
+});
+
+// ------------------------------------------------------
+// POST /diagnostic-tree
+// ------------------------------------------------------
+app.post("/diagnostic-tree", async (req, res) => {
+  try {
+    const { message, vehicleContext } = req.body;
+
+    let mergedVehicle = mergeVehicleContexts(vehicleContext, {});
+    mergedVehicle.engine = inferEngineStringFromYMM(mergedVehicle);
+
+    const systemPrompt = `
+You are GRIT — structured diagnostic engine.
+Return ONLY valid JSON:
+
+{
+  "symptom_summary": "",
+  "likely_causes": [
+    { "cause": "", "confidence": 0.0, "notes": "" }
+  ],
+  "tests": [
+    { "test": "", "why": "", "how": "", "tools": "" }
+  ],
+  "branching_logic": [
+    { "if": "", "next": "" }
+  ],
+  "red_flags": [],
+  "recommended_next_steps": []
+}
+`;
+
+    const ai = await openai.chat.completions.create({
+      model: "gpt-4.1",
+      temperature: 0.3,
+      messages: [
+        { role: "system", content: systemPrompt },
+        {
+          role: "system",
+          content: `Vehicle context: ${JSON.stringify(mergedVehicle)}`
+        },
+        { role: "user", content: message }
+      ]
+    });
+
+    let tree;
+    try {
+      tree = JSON.parse(ai.choices[0].message.content);
+    } catch {
+      return res.status(500).json({
+        error: "Invalid diagnostic JSON",
+        raw: ai.choices[0].message.content
+      });
+    }
+
+    res.json({ vehicle: mergedVehicle, tree });
+  } catch (err) {
+    res.status(500).json({ error: "Diagnostic tree error" });
+  }
+});
+
+// ------------------------------------------------------
+// POST /send-feedback (email to support)
+// ------------------------------------------------------
+app.post("/send-feedback", async (req, res) => {
+  const { feedback } = req.body;
+
+  if (!feedback) return res.status(400).json({ error: "Feedback required" });
+
+  try {
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        user: process.env.SUPPORT_EMAIL,
+        pass: process.env.SUPPORT_EMAIL_PASS
+      }
+    });
+
+    await transporter.sendMail({
+      from: process.env.SUPPORT_EMAIL,
+      to: "support@autobrain-ai.com",
+      subject: "Technician Feedback — AutoBrain GRIT",
+      text: feedback
+    });
+
+    res.json({ status: "ok" });
+  } catch (err) {
+    res.status(500).json({ status: "error", details: err.message });
   }
 });
 
