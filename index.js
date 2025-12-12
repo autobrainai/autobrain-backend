@@ -1,11 +1,5 @@
 // ===========================================================
-// AUTO BRAIN — GRIT BACKEND (FINAL UPDATED VERSION)
-// Includes:
-// - VIN Decoding + Supabase Cache
-// - Engine Code Classification (GM RPO -> Gen IV/V, AFM, DI)
-// - Chat Endpoint
-// - Diagnostic Tree Endpoint
-// - Feedback Email Endpoint (RESEND VERSION - RELIABLE)
+// AUTO BRAIN — GRIT BACKEND (UPDATED WITH RULESET v2)
 // ===========================================================
 
 import express from "express";
@@ -43,7 +37,48 @@ const openai = new OpenAI({
 const resend = new Resend(process.env.RESEND_API_KEY);
 
 // ------------------------------------------------------
-// ENGINE MAP (Simple inference if engine missing)
+// GRIT DIAGNOSTIC RULESET — ALWAYS ENFORCED
+// ------------------------------------------------------
+const GRIT_RULESET = `
+When the user does not know the code / only sees "check engine light":
+- Explain they must get an actual code before meaningful diagnostics.
+- Ask where they scanned it.
+- Recommend AutoZone/O'Reilly for basic free scans.
+- Warn their part recommendations are often wrong.
+- Explain they cannot scan BCM, TCM, Airbag, HVAC, or advanced modules.
+- Recommend a professional shop for full vehicle scanning.
+
+When user says they replaced a part:
+- Never trust the new part.
+- Stress that aftermarket parts often fail immediately.
+- Recommend OEM parts for GM, Ford, Honda, Toyota.
+- Warn about Amazon/eBay counterfeit/no-name parts.
+- Suggest verifying the part actually functions.
+
+Order of Operations (ALWAYS):
+1. Easy tests first (battery, grounds, fuses, visual checks, scanning codes).
+2. Quick mechanical tests (spark plugs, vacuum leaks, compression).
+3. Scanner-based verification:
+   - Ford Power Balance
+   - Ford Relative Compression
+   - GM Injector Balance
+   - Fuel trims, misfire counters, Mode $06
+4. Labor-intensive tests last (intake removal, valve covers, deep tracing).
+
+GRIT communication rules:
+- Explain WHY a test is done.
+- Push the user to verify conditions before guessing.
+- Require mileage when relevant.
+- Require symptom description if vague.
+- Be blunt but helpful. No fluff.
+
+If user is stuck:
+- Give step-by-step instructions.
+- Ask for results before continuing.
+`;
+
+// ------------------------------------------------------
+// ENGINE MAP — fallback inference
 // ------------------------------------------------------
 const ENGINE_MAP = {
   "2013|Chevrolet|Tahoe": "5.3L V8",
@@ -72,21 +107,21 @@ function classifyGMEngine(engineModelRaw, displacementLRaw) {
     case "L77":
       generation = "Gen IV";
       hasAFM = true;
-      notes = "Gen IV AFM — known AFM lifter failures, VLOM faults.";
+      notes = "Gen IV AFM — common AFM lifter/VLOM failures.";
       break;
 
     case "LMG":
     case "LY5":
       generation = "Gen IV";
       hasAFM = false;
-      notes = "Gen IV non-AFM — fewer AFM lifter issues.";
+      notes = "Gen IV non-AFM.";
       break;
 
     case "L83":
       generation = "Gen V";
       hasAFM = true;
       isDI = true;
-      notes = "Gen V DI AFM — DI injector issues, AFM lifter collapse, HPFP failures.";
+      notes = "Gen V DI AFM — injector, AFM lifter, HPFP failures.";
       break;
 
     case "L86":
@@ -94,19 +129,19 @@ function classifyGMEngine(engineModelRaw, displacementLRaw) {
       generation = "Gen V";
       hasAFM = true;
       isDI = true;
-      notes = "Gen V 6.2 DI AFM — common injector balancing & AFM issues.";
+      notes = "Gen V DI AFM 6.2L — injector & AFM issues.";
       break;
 
     case "L96":
       generation = "Gen IV";
       hasAFM = false;
-      notes = "6.0 HD Work Engine — common ignition & exhaust issues.";
+      notes = "6.0 HD work engine.";
       break;
 
     case "L92":
     case "L9H":
       generation = "Gen IV";
-      notes = "Gen IV 6.2 non-AFM.";
+      notes = "6.2 non-AFM.";
       break;
 
     default:
@@ -171,7 +206,8 @@ async function extractVehicleFromText(message) {
           content: `
 Extract ONLY this JSON:
 { "year": "", "make": "", "model": "", "engine": "" }
-Unknown -> empty string.`
+Unknown => empty string.
+`
         },
         { role: "user", content: message }
       ]
@@ -184,19 +220,18 @@ Unknown -> empty string.`
 }
 
 // ------------------------------------------------------
-// GRIT SHORT RESPONSE
+// QUICK SHORT-GRIT RESPONSE (when appropriate)
 // ------------------------------------------------------
 function buildGritResponse(msg, v) {
   const lower = msg.toLowerCase();
-
   const hasSymptoms =
     lower.includes("code") ||
     lower.includes("p0") ||
     lower.includes("misfir") ||
-    lower.includes("noise") ||
-    lower.includes("overheat") ||
+    lower.includes("no start") ||
     lower.includes("stall") ||
-    lower.includes("no start");
+    lower.includes("noise") ||
+    lower.includes("overheat");
 
   const short = msg.trim().split(/\s+/).length <= 6;
 
@@ -209,14 +244,14 @@ But what's it *doing*?
 Codes?
 Misfires?
 No-start?
-Noises?
+Noise?
 Overheating?
 
-Give symptoms and mileage so I can build a real diagnostic plan.`;
+Give mileage + symptoms so I can build a real plan.`;
 }
 
 // ------------------------------------------------------
-// VIN DECODE
+// VIN DECODE (with Supabase cache)
 // ------------------------------------------------------
 async function decodeVinWithCache(vinRaw) {
   const vin = vinRaw.trim().toUpperCase();
@@ -257,19 +292,14 @@ async function decodeVinWithCache(vinRaw) {
 
   const engineDetails = classifyGMEngine(engineModel, disp);
 
-  let engineString = "";
-  if (engineDetails?.code) {
-    engineString = `${engineDetails.displacement_l}L ${engineDetails.code} ${engineDetails.has_afm ? "AFM" : ""} ${engineDetails.is_direct_injected ? "DI" : ""}`.trim();
-  } else {
-    engineString = engineModel || disp || "";
-  }
-
   const decoded = {
     vin,
     year,
     make,
     model,
-    engine: engineString,
+    engine: engineDetails?.code
+      ? `${engineDetails.displacement_l}L ${engineDetails.code}`
+      : engineModel || disp || "",
     engineDetails
   };
 
@@ -278,7 +308,7 @@ async function decodeVinWithCache(vinRaw) {
     year,
     make,
     model,
-    engine: engineString,
+    engine: decoded.engine,
     engine_details: engineDetails,
     raw: results
   });
@@ -311,25 +341,28 @@ app.post("/chat", async (req, res) => {
     let mergedVehicle = mergeVehicleContexts(vehicleContext, extracted);
     mergedVehicle.engine = inferEngineStringFromYMM(mergedVehicle);
 
+    // Quick short response
     const quick = buildGritResponse(message, mergedVehicle);
     if (quick) {
       return res.json({ reply: quick, vehicle: mergedVehicle });
     }
 
+    // AI Response with full GRIT RULESET
     const ai = await openai.chat.completions.create({
       model: "gpt-4.1",
-      temperature: 0.4,
+      temperature: 0.3,
       messages: [
         {
           role: "system",
           content: `
-You are GRIT — ruthless diagnostic mentor.
-Use engineDetails to modify diagnosis (AFM, DI, Gen V, etc).
-No fluff. Crisp instructions only.`
-        },
-        {
-          role: "system",
-          content: `Vehicle: ${JSON.stringify(mergedVehicle)}`
+You are GRIT — a ruthless diagnostic mentor for technicians.
+You must strictly follow the rules below:
+
+${GRIT_RULESET}
+
+Vehicle Context:
+${JSON.stringify(mergedVehicle)}
+`
         },
         ...(context || []),
         { role: "user", content: message }
@@ -402,7 +435,7 @@ Return ONLY valid JSON:
 });
 
 // ------------------------------------------------------
-// POST /send-feedback (RESEND EMAIL)
+// POST /send-feedback
 // ------------------------------------------------------
 app.post("/send-feedback", async (req, res) => {
   try {
@@ -433,7 +466,7 @@ app.post("/send-feedback", async (req, res) => {
 // HEALTH CHECK
 // ------------------------------------------------------
 app.get("/", (req, res) => {
-  res.send("AutoBrain / GRIT backend running");
+  res.send("AutoBrain / GRIT backend running (Ruleset v2)");
 });
 
 // ------------------------------------------------------
