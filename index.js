@@ -26,16 +26,32 @@ app.get("/", (req, res) => {
   res.json({ status: "ok", message: "AutoBrain backend running" });
 });
 
-// Diagnostic chat endpoint
+
+// ======================================================
+// ✅ FIXED /api/chat ROUTE (SAFE VERSION)
+// ======================================================
 app.post("/api/chat", async (req, res) => {
   try {
-    const { technicianId, vehicle, symptom, notes } = req.body;
+    // Safely read body even if undefined
+    const {
+      technicianId = "demo-tech",
+      vehicle = {},
+      symptom = "",
+      notes = "",
+    } = req.body || {};
 
-    // 1. Create conversation entry
+    // Validate required fields
+    if (!symptom || !vehicle) {
+      return res.status(400).json({
+        error: "Missing data: 'vehicle' and 'symptom' are required.",
+      });
+    }
+
+    // 1. Create conversation
     const { data: conv, error: convError } = await supabase
       .from("conversations")
       .insert({
-        technician_id: technicianId || "demo-tech",
+        technician_id: technicianId,
       })
       .select()
       .single();
@@ -45,9 +61,9 @@ app.post("/api/chat", async (req, res) => {
       return res.status(500).json({ error: "Failed to create conversation" });
     }
 
-    // 2. Relevant diagnostic cases
+    // 2. Pull relevant diagnostic cases
     let relevantCasesText = "";
-    if (vehicle && vehicle.make && vehicle.model) {
+    if (vehicle.make && vehicle.model) {
       const { data: cases, error: caseError } = await supabase
         .from("diagnostic_cases")
         .select("*")
@@ -73,7 +89,9 @@ Notes: ${c.notes}
 
     // 3. Build diagnostic prompt
     const userDescription = `
-Vehicle: ${vehicle?.year || "unknown"} ${vehicle?.make || ""} ${vehicle?.model || ""} ${vehicle?.engine || ""}
+Vehicle: ${vehicle.year || "unknown"} ${vehicle.make || ""} ${
+      vehicle.model || ""
+    } ${vehicle.engine || ""}
 Symptom: ${symptom}
 Notes: ${notes || "none"}
 `;
@@ -88,7 +106,6 @@ Return:
 5. Notes or cautions
 
 Reference data:
-
 ${relevantCasesText || "No reference data available."}
 `;
 
@@ -127,7 +144,10 @@ ${relevantCasesText || "No reference data available."}
   }
 });
 
-// Specs lookup endpoint
+
+// ======================================================
+// SPECS LOOKUP ROUTE
+// ======================================================
 app.post("/api/specs", async (req, res) => {
   try {
     const { query } = req.body;
@@ -155,6 +175,10 @@ If unsure, say "Not enough data".
   }
 });
 
+
+// ======================================================
+// START SERVER
+// ======================================================
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`AutoBrain backend listening on port ${PORT}`);
