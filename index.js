@@ -5,7 +5,6 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { Resend } from "resend";
 import { createClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
 
@@ -30,10 +29,6 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// ------------------------------------------------------
-// Resend Email
-// ------------------------------------------------------
-const resend = new Resend(process.env.RESEND_API_KEY);
 
 // ------------------------------------------------------
 // 🔒 GRIT SYSTEM PROMPT — NON-NEGOTIABLE
@@ -311,22 +306,11 @@ ${JSON.stringify(mergedVehicle)}
 // POST /send-feedback
 // ------------------------------------------------------
 app.post("/send-feedback", async (req, res) => {
-  try {
-    const { feedback } = req.body;
-    if (!feedback) return res.status(400).json({ error: "Feedback required" });
-
-    await resend.emails.send({
-      from: "AutoBrain Feedback <feedback@autobrain-ai.com>",
-      to: "support@autobrain-ai.com",
-      subject: "New AutoBrain GRIT Feedback",
-      html: `<p>${feedback.replace(/\n/g, "<br>")}</p>`
-    });
-
-    res.json({ status: "ok" });
-  } catch {
-    res.status(500).json({ error: "Email failed" });
-  }
+  res.status(503).json({
+    error: "Feedback temporarily disabled. Coming back soon."
+  });
 });
+
 
 // ------------------------------------------------------
 // HEALTH CHECK
