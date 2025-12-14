@@ -5,7 +5,6 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import fetch from "node-fetch";
 import { Resend } from "resend";
 import { createClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
