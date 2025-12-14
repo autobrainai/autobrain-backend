@@ -5,6 +5,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import fetch from "node-fetch";
 import { createClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
 
@@ -28,11 +29,6 @@ const supabase = createClient(
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
-
-// ------------------------------------------------------
-// Resend Email Client
-// ------------------------------------------------------
-
 
 // ------------------------------------------------------
 // GRIT DIAGNOSTIC RULESET — ALWAYS ENFORCED
@@ -84,91 +80,10 @@ const ENGINE_MAP = {
 };
 
 // ------------------------------------------------------
-// GM ENGINE CLASSIFICATION LOGIC
-// ------------------------------------------------------
-function classifyGMEngine(engineModelRaw, displacementLRaw) {
-  if (!engineModelRaw) return null;
-
-  const code = String(engineModelRaw).trim().toUpperCase();
-  const disp = displacementLRaw ? String(displacementLRaw) : "";
-
-  let generation = "";
-  let hasAFM = false;
-  let isDI = false;
-  let notes = "";
-
-  switch (code) {
-    case "LC9":
-    case "LH6":
-    case "L59":
-    case "L76":
-    case "L77":
-      generation = "Gen IV";
-      hasAFM = true;
-      notes = "Gen IV AFM — common AFM lifter/VLOM failures.";
-      break;
-
-    case "LMG":
-    case "LY5":
-      generation = "Gen IV";
-      hasAFM = false;
-      notes = "Gen IV non-AFM.";
-      break;
-
-    case "L83":
-      generation = "Gen V";
-      hasAFM = true;
-      isDI = true;
-      notes = "Gen V DI AFM — injector, AFM lifter, HPFP failures.";
-      break;
-
-    case "L86":
-    case "L94":
-      generation = "Gen V";
-      hasAFM = true;
-      isDI = true;
-      notes = "Gen V DI AFM 6.2L — injector & AFM issues.";
-      break;
-
-    case "L96":
-      generation = "Gen IV";
-      hasAFM = false;
-      notes = "6.0 HD work engine.";
-      break;
-
-    case "L92":
-    case "L9H":
-      generation = "Gen IV";
-      notes = "6.2 non-AFM.";
-      break;
-
-    default:
-      return {
-        code,
-        generation: "",
-        displacement_l: disp,
-        has_afm: false,
-        is_direct_injected: false,
-        notes: ""
-      };
-  }
-
-  return {
-    code,
-    generation,
-    displacement_l: disp,
-    has_afm: hasAFM,
-    is_direct_injected: isDI,
-    notes
-  };
-}
-
-// ------------------------------------------------------
 // ENGINE STRING INFERENCE
 // ------------------------------------------------------
 function inferEngineStringFromYMM(vehicle) {
   if (vehicle.engine) return vehicle.engine;
-
   const key = `${vehicle.year}|${vehicle.make}|${vehicle.model}`;
   return ENGINE_MAP[key] || "";
 }
@@ -182,43 +97,70 @@ function mergeVehicleContexts(existing = {}, incoming = {}) {
     year: incoming.year || existing.year || "",
     make: incoming.make || existing.make || "",
     model: incoming.model || existing.model || "",
-    engine: incoming.engine || existing.engine || "",
-    engineDetails: {
-      ...(existing.engineDetails || {}),
-      ...(incoming.engineDetails || {})
-    }
+    engine: incoming.engine || existing.engine || ""
   };
 }
 
-// ------------------------------------------------------
-// Extract YMM from user text
-// ------------------------------------------------------
+// --------------------------------------------------
+// Extract Vehicle Context from Free Text (STRICT)
+// --------------------------------------------------
 async function extractVehicleFromText(message) {
   try {
+    const systemPrompt = [
+      "You are an automotive parser.",
+      "",
+      "Extract vehicle information ONLY if explicitly stated.",
+      "DO NOT guess.",
+      "DO NOT infer missing data.",
+      "",
+      "Return EXACT JSON with this schema:",
+      "{",
+      '  "year": "",',
+      '  "make": "",',
+      '  "model": "",',
+      '  "engine": ""',
+      "}",
+      "",
+      "Rules:",
+      "- Year must be 4 digits (e.g. 2013)",
+      "- Normalize common makes:",
+      "  - Tahoe → Chevrolet Tahoe",
+      "  - F150 → Ford F-150",
+      "  - Silverado → Chevrolet Silverado",
+      "  - Ram → Ram 1500",
+      '- Engine must include displacement if stated (e.g. "5.3", "5.3L")',
+      "- If any field is unknown, return empty string",
+      "- Return JSON ONLY. No commentary."
+    ].join("\n");
+
     const resp = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
       temperature: 0,
       messages: [
-        {
-          role: "system",
-          content: `
-Extract ONLY this JSON:
-{ "year": "", "make": "", "model": "", "engine": "" }
-Unknown => empty string.
-`
-        },
+        { role: "system", content: systemPrompt },
         { role: "user", content: message }
       ]
     });
 
-    return JSON.parse(resp.choices[0].message.content);
-  } catch {
+    const raw = resp.choices[0].message.content;
+    const parsed = JSON.parse(raw);
+
+    return {
+      year: parsed.year || "",
+      make: parsed.make || "",
+      model: parsed.model || "",
+      engine: parsed.engine || ""
+    };
+  } catch (err) {
+    console.error("extractVehicleFromText failed:", err);
     return { year: "", make: "", model: "", engine: "" };
   }
 }
 
+
+
 // ------------------------------------------------------
-// QUICK SHORT-GRIT RESPONSE (when appropriate)
+// QUICK SHORT-GRIT RESPONSE
 // ------------------------------------------------------
 function buildGritResponse(msg, v) {
   const lower = msg.toLowerCase();
@@ -237,6 +179,7 @@ function buildGritResponse(msg, v) {
 
   return `
 A ${v.year} ${v.make} ${v.model}. Noted.
+
 But what's it *doing*?
 
 Codes?
@@ -246,72 +189,6 @@ Noise?
 Overheating?
 
 Give mileage + symptoms so I can build a real plan.`;
-}
-
-// ------------------------------------------------------
-// VIN DECODE (with Supabase cache)
-// ------------------------------------------------------
-async function decodeVinWithCache(vinRaw) {
-  const vin = vinRaw.trim().toUpperCase();
-
-  const { data } = await supabase
-    .from("vin_decodes")
-    .select("*")
-    .eq("vin", vin)
-    .maybeSingle();
-
-  if (data) {
-    return {
-      vin,
-      year: data.year,
-      make: data.make,
-      model: data.model,
-      engine: data.engine,
-      engineDetails: data.engine_details
-    };
-  }
-
-  const resp = await fetch(
-    `https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVin/${vin}?format=json`
-  );
-  const json = await resp.json();
-  const results = json.Results;
-
-  const get = (label) => {
-    const row = results.find((r) => r.Variable === label);
-    return row?.Value && row.Value !== "Not Applicable" ? row.Value : "";
-  };
-
-  const year = get("Model Year");
-  const make = get("Make");
-  const model = get("Model");
-  const engineModel = get("Engine Model");
-  const disp = get("Displacement (L)");
-
-  const engineDetails = classifyGMEngine(engineModel, disp);
-
-  const decoded = {
-    vin,
-    year,
-    make,
-    model,
-    engine: engineDetails?.code
-      ? `${engineDetails.displacement_l}L ${engineDetails.code}`
-      : engineModel || disp || "",
-    engineDetails
-  };
-
-  await supabase.from("vin_decodes").upsert({
-    vin,
-    year,
-    make,
-    model,
-    engine: decoded.engine,
-    engine_details: engineDetails,
-    raw: results
-  });
-
-  return decoded;
 }
 
 // ------------------------------------------------------
@@ -339,13 +216,11 @@ app.post("/chat", async (req, res) => {
     let mergedVehicle = mergeVehicleContexts(vehicleContext, extracted);
     mergedVehicle.engine = inferEngineStringFromYMM(mergedVehicle);
 
-    // Quick short response
     const quick = buildGritResponse(message, mergedVehicle);
     if (quick) {
       return res.json({ reply: quick, vehicle: mergedVehicle });
     }
 
-    // AI Response with full GRIT RULESET
     const ai = await openai.chat.completions.create({
       model: "gpt-4.1",
       temperature: 0.3,
@@ -354,7 +229,6 @@ app.post("/chat", async (req, res) => {
           role: "system",
           content: `
 You are GRIT — a ruthless diagnostic mentor for technicians.
-You must strictly follow the rules below:
 
 ${GRIT_RULESET}
 
@@ -373,90 +247,6 @@ ${JSON.stringify(mergedVehicle)}
     });
   } catch (err) {
     res.status(500).json({ error: "Chat error" });
-  }
-});
-
-// ------------------------------------------------------
-// POST /diagnostic-tree
-// ------------------------------------------------------
-app.post("/diagnostic-tree", async (req, res) => {
-  try {
-    const { message, vehicleContext } = req.body;
-
-    let mergedVehicle = mergeVehicleContexts(vehicleContext, {});
-    mergedVehicle.engine = inferEngineStringFromYMM(mergedVehicle);
-
-    const systemPrompt = `
-Return ONLY valid JSON:
-{
-  "symptom_summary": "",
-  "likely_causes": [
-    { "cause": "", "confidence": 0.0, "notes": "" }
-  ],
-  "tests": [
-    { "test": "", "why": "", "how": "", "tools": "" }
-  ],
-  "branching_logic": [
-    { "if": "", "next": "" }
-  ],
-  "red_flags": [],
-  "recommended_next_steps": []
-}`;
-
-    const ai = await openai.chat.completions.create({
-      model: "gpt-4.1",
-      temperature: 0.2,
-      messages: [
-        { role: "system", content: systemPrompt },
-        {
-          role: "system",
-          content: `Vehicle: ${JSON.stringify(mergedVehicle)}`
-        },
-        { role: "user", content: message }
-      ]
-    });
-
-    let json;
-    try {
-      json = JSON.parse(ai.choices[0].message.content);
-    } catch {
-      return res.status(500).json({
-        error: "Invalid JSON",
-        raw: ai.choices[0].message.content
-      });
-    }
-
-    res.json({ vehicle: mergedVehicle, tree: json });
-  } catch {
-    res.status(500).json({ error: "Diagnostic tree error" });
-  }
-});
-
-// ------------------------------------------------------
-// POST /send-feedback
-// ------------------------------------------------------
-app.post("/send-feedback", async (req, res) => {
-  try {
-    const { feedback } = req.body;
-
-    if (!feedback || feedback.trim() === "") {
-      return res.status(400).json({ error: "Feedback required" });
-    }
-
-    await resend.emails.send({
-      from: "AutoBrain Feedback <feedback@autobrain-ai.com>",
-      to: "support@autobrain-ai.com",
-      subject: "New AutoBrain GRIT Feedback",
-      html: `
-        <h2>Technician Feedback Submitted</h2>
-        <p>${feedback.replace(/\n/g, "<br>")}</p>
-      `
-    });
-
-    res.json({ status: "ok" });
-  } catch (err) {
-    console.error("Feedback error:", err);
-    res.status(500).json({ error: "Email send failed" });
   }
 });
 
