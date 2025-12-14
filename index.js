@@ -1,5 +1,6 @@
 // ===========================================================
-// AUTO BRAIN — GRIT BACKEND (UPDATED WITH RULESET v2)
+// AUTO BRAIN — GRIT BACKEND (LOCKED VERSION)
+// DO NOT EDIT TEMPLATE STRINGS UNLESS INSTRUCTED
 // ===========================================================
 
 import express from "express";
@@ -56,26 +57,21 @@ Order of Operations (ALWAYS):
    - Ford Relative Compression
    - GM Injector Balance
    - Fuel trims, misfire counters, Mode $06
-4. Labor-intensive tests last (intake removal, valve covers, deep tracing).
+4. Labor-intensive tests last.
 
-GRIT communication rules:
+Rules:
 - Explain WHY a test is done.
-- Push the user to verify conditions before guessing.
 - Require mileage when relevant.
-- Require symptom description if vague.
-- Be blunt but helpful. No fluff.
-
-If user is stuck:
-- Give step-by-step instructions.
-- Ask for results before continuing.
+- Require symptoms if vague.
+- Be blunt. No fluff.
 `;
 
 // ------------------------------------------------------
-// ENGINE MAP — fallback inference
+// ENGINE MAP (fallback only)
 // ------------------------------------------------------
 const ENGINE_MAP = {
-  "2013|Chevrolet|Tahoe": "5.3L V8",
-  "2013|Chevy|Tahoe": "5.3L V8"
+  "2013|Chevrolet|Tahoe": "5.3L",
+  "2013|Chevy|Tahoe": "5.3L"
 };
 
 // ------------------------------------------------------
@@ -100,9 +96,9 @@ function mergeVehicleContexts(existing = {}, incoming = {}) {
   };
 }
 
-// --------------------------------------------------
+// ------------------------------------------------------
 // Extract Vehicle Context from Free Text (STRICT)
-// --------------------------------------------------
+// ------------------------------------------------------
 async function extractVehicleFromText(message) {
   try {
     const systemPrompt = [
@@ -127,9 +123,9 @@ async function extractVehicleFromText(message) {
       "  - F150 → Ford F-150",
       "  - Silverado → Chevrolet Silverado",
       "  - Ram → Ram 1500",
-      '- Engine must include displacement if stated (e.g. "5.3", "5.3L")',
-      "- If any field is unknown, return empty string",
-      "- Return JSON ONLY. No commentary."
+      '- Engine must include displacement if stated (e.g. "5.3L")',
+      "- If unknown, return empty string",
+      "- Return JSON ONLY"
     ].join("\n");
 
     const resp = await openai.chat.completions.create({
@@ -156,30 +152,17 @@ async function extractVehicleFromText(message) {
   }
 }
 
-
-
 // ------------------------------------------------------
-// QUICK SHORT-GRIT RESPONSE
+// SHORT GRIT RESPONSE (context only)
 // ------------------------------------------------------
 function buildGritResponse(msg, v) {
-  const lower = msg.toLowerCase();
-  const hasSymptoms =
-    lower.includes("code") ||
-    lower.includes("p0") ||
-    lower.includes("misfir") ||
-    lower.includes("no start") ||
-    lower.includes("stall") ||
-    lower.includes("noise") ||
-    lower.includes("overheat");
-
   const short = msg.trim().split(/\s+/).length <= 6;
-
-  if (!short || hasSymptoms || !(v.year || v.make || v.model)) return null;
+  if (!short || !(v.year || v.make || v.model)) return null;
 
   return `
 A ${v.year} ${v.make} ${v.model}. Noted.
 
-But what's it *doing*?
+But what’s it doing?
 
 Codes?
 Misfires?
@@ -187,22 +170,9 @@ No-start?
 Noise?
 Overheating?
 
-Give mileage + symptoms so I can build a real plan.`;
+Give mileage + symptoms so I can build a real plan.
+`.trim();
 }
-
-// ------------------------------------------------------
-// POST /decode-vin
-// ------------------------------------------------------
-app.post("/decode-vin", async (req, res) => {
-  try {
-    const decoded = await decodeVinWithCache(req.body.vin);
-    let merged = mergeVehicleContexts(req.body.vehicleContext, decoded);
-    merged.engine = inferEngineStringFromYMM(merged);
-    res.json({ vehicle: merged });
-  } catch {
-    res.status(500).json({ error: "VIN decode error" });
-  }
-});
 
 // ------------------------------------------------------
 // POST /chat
@@ -214,6 +184,27 @@ app.post("/chat", async (req, res) => {
     const extracted = await extractVehicleFromText(message);
     let mergedVehicle = mergeVehicleContexts(vehicleContext, extracted);
     mergedVehicle.engine = inferEngineStringFromYMM(mergedVehicle);
+
+    // Ambiguous engine guard
+    const ambiguous = ["v8", "v6", "4cyl", "4 cylinder"];
+    if (
+      mergedVehicle.engine &&
+      ambiguous.includes(mergedVehicle.engine.toLowerCase())
+    ) {
+      return res.json({
+        reply: `
+I can help — but engine choice matters here.
+
+This vehicle came with multiple engine options, and guessing leads to bad diagnostics.
+
+If you can, drop the VIN.
+With the VIN I can confirm the exact engine and build the correct diagnostic path.
+
+If VIN isn’t available, tell me the exact engine size (e.g. 5.3L or 6.2L).
+`.trim(),
+        vehicle: mergedVehicle
+      });
+    }
 
     const quick = buildGritResponse(message, mergedVehicle);
     if (quick) {
@@ -227,7 +218,7 @@ app.post("/chat", async (req, res) => {
         {
           role: "system",
           content: `
-You are GRIT — a ruthless diagnostic mentor for technicians.
+You are GRIT — a ruthless diagnostic mentor.
 
 ${GRIT_RULESET}
 
@@ -245,6 +236,7 @@ ${JSON.stringify(mergedVehicle)}
       vehicle: mergedVehicle
     });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Chat error" });
   }
 });
@@ -253,7 +245,7 @@ ${JSON.stringify(mergedVehicle)}
 // HEALTH CHECK
 // ------------------------------------------------------
 app.get("/", (req, res) => {
-  res.send("AutoBrain / GRIT backend running (Ruleset v2)");
+  res.send("AutoBrain / GRIT backend running (LOCKED)");
 });
 
 // ------------------------------------------------------
