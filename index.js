@@ -40,16 +40,13 @@ const openai = new OpenAI({
 const GRIT_RULESET = `
 When the user does not know the code / only sees "check engine light":
 - Explain they must get an actual code before meaningful diagnostics.
-- Ask where they scanned it.
-- Recommend AutoZone/O'Reilly for basic free scans.
-- Warn their part recommendations are often wrong.
-- Explain they cannot scan BCM, TCM, Airbag, HVAC, or advanced modules.
-- Recommend a professional shop for full vehicle scanning.
+- Recommend using a shop diagnostic scanner for extensive scans or AutoZone/O'Reilly for basic free scans.
+- Explain some newer vehicles with secure gateway need factory scanners.
 
-When user says they replaced a part:
-- Never trust the new part.
+When user says a part was recently replaced:
+- Never trust the new part, even OEM parts, always test new parts again.
 - Stress that aftermarket parts often fail immediately.
-- Recommend OEM parts for GM, Ford, Honda, Toyota.
+- Recommend OEM parts for GM, Ford, Honda, Toyota and European vehicles.
 - Warn about Amazon/eBay counterfeit/no-name parts.
 - Suggest verifying the part actually functions.
 
