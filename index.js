@@ -5,7 +5,6 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { Resend } from "resend";
 import { createClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
 
@@ -33,7 +32,7 @@ const openai = new OpenAI({
 // ------------------------------------------------------
 // Resend Email Client
 // ------------------------------------------------------
-const resend = new Resend(process.env.RESEND_API_KEY);
+
 
 // ------------------------------------------------------
 // GRIT DIAGNOSTIC RULESET — ALWAYS ENFORCED
