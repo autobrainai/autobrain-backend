@@ -547,8 +547,7 @@ let diagnosticState = {
   disclaimerSent: false,
   classification: {
     misfire: null
-    // example once locked:
-    // { cylinder: 3, type: "single", condition: "idle" }
+    smoke: null
   }
 };
 
@@ -771,6 +770,37 @@ if (!diagnosticState.disclaimerSent) {
 if (diagnosticState.awaitingResponse && diagnosticState.lastStep) {
 
 
+// 🔒 LOCK SMOKE CLASSIFICATION
+if (
+  diagnosticState.lastStep === "classify_smoke" &&
+  diagnosticState.awaitingResponse
+) {
+  const lowerMsg = message.toLowerCase();
+
+  diagnosticState.classification.smoke = {
+    source: lowerMsg.includes("engine") ? "engine_bay" : "exhaust",
+    color:
+      lowerMsg.includes("blue")
+        ? "blue"
+        : lowerMsg.includes("black")
+        ? "black"
+        : "white",
+    condition:
+      lowerMsg.includes("startup")
+        ? "startup"
+        : lowerMsg.includes("idle")
+        ? "idle"
+        : lowerMsg.includes("driving")
+        ? "driving"
+        : "unknown"
+  };
+
+  diagnosticState.lastStep = "smoke_confirmed";
+  diagnosticState.awaitingResponse = false;
+}
+
+
+
   const result = classifyTechResponse(message);
 
 if (result && DIAGNOSTIC_STEPS[diagnosticState.lastStep]) {
@@ -893,6 +923,27 @@ if (
       "1) Is it a SINGLE cylinder misfire or MULTIPLE/random?\n" +
       "2) Does it occur at idle, under load, cold, or hot?\n\n" +
       "Reply briefly.",
+    vehicle: mergeVehicleContexts(vehicleContext, {})
+  });
+}
+
+// 🚨 SMOKING FIRST-STEP GATE
+if (
+  diagnosticState.mode === "active" &&
+  !diagnosticState.classification?.smoke &&
+  /(smoke|smoking|burning oil|steam)/i.test(message)
+) {
+  diagnosticState.lastStep = "classify_smoke";
+  diagnosticState.awaitingResponse = true;
+
+  return res.json({
+    reply:
+      "Before diagnosing smoke, classify it.\n\n" +
+      "Reply with THREE things in one line:\n\n" +
+      "1) Source: exhaust OR engine bay\n" +
+      "2) Color: white, blue, or black\n" +
+      "3) When it happens: startup, idle, driving, or all the time\n\n" +
+      "Example: exhaust, blue, idle",
     vehicle: mergeVehicleContexts(vehicleContext, {})
   });
 }
@@ -1299,6 +1350,7 @@ diagnosticState = {
   disclaimerSent: false,
   classification: {
     misfire: null
+    smoke: null
   }
 };
 
