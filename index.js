@@ -779,7 +779,6 @@ if (Array.isArray(context)) {
   });
 }
 }
-}
 
 // 2️⃣ Enter diagnostic mode
 if (
