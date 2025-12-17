@@ -675,6 +675,230 @@ if (
   }
 }
 
+// 🚨 NO-START FIRST-STEP GATE (CRITICAL)
+if (
+  diagnosticState.mode === "active" &&
+  !diagnosticState.lastStep &&
+  /no start/i.test(message)
+) {
+  diagnosticState.lastStep = "classify_crank";
+  diagnosticState.awaitingResponse = true;
+
+  return res.json({
+    reply:
+      "Before any testing, we must classify the failure.\n\n" +
+      "When you turn the key:\n" +
+      "1) Does the engine crank (turn over) but not start?\n" +
+      "OR\n" +
+      "2) Is it a no-crank condition (starter does not engage)?\n\n" +
+      "Reply with ONLY one.",
+    vehicle: mergeVehicleContexts(vehicleContext, {})
+  });
+}
+
+
+// 🚨 OVERHEATING FIRST-STEP GATE (CRITICAL)
+if (
+  diagnosticState.mode === "active" &&
+  !diagnosticState.lastStep &&
+  /overheat|overheating|running hot|temp gauge/i.test(message)
+) {
+  diagnosticState.lastStep = "classify_overheat";
+  diagnosticState.awaitingResponse = true;
+
+  return res.json({
+    reply:
+      "Before testing anything, we must classify the overheating condition.\n\n" +
+      "Which best describes it?\n\n" +
+      "1) Overheats at idle / stopped\n" +
+      "2) Overheats while driving\n" +
+      "3) Overheats only at highway speeds or under load\n" +
+      "4) Pegs hot very quickly after startup\n" +
+      "5) Gauge reads hot but no boil-over or coolant loss\n\n" +
+      "Reply with ONLY the number that fits best.",
+    vehicle: mergeVehicleContexts(vehicleContext, {})
+  });
+}
+
+// 🚨 MISFIRE FIRST-STEP GATE
+if (
+  diagnosticState.mode === "active" &&
+  !diagnosticState.lastStep &&
+  /misfire|misfiring|rough idle|shaking/i.test(message)
+) {
+  diagnosticState.lastStep = "classify_misfire";
+  diagnosticState.awaitingResponse = true;
+
+  return res.json({
+    reply:
+      "Before testing anything, classify the misfire.\n\n" +
+      "Answer BOTH:\n\n" +
+      "1) Is it a SINGLE cylinder misfire or MULTIPLE/random?\n" +
+      "2) Does it occur at idle, under load, cold, or hot?\n\n" +
+      "Reply briefly.",
+    vehicle: mergeVehicleContexts(vehicleContext, {})
+  });
+}
+
+
+// 🚨 LEAN CONDITION FIRST-STEP GATE
+if (
+  diagnosticState.mode === "active" &&
+  !diagnosticState.lastStep &&
+  /(p0171|p0174|lean condition|running lean)/i.test(message)
+) {
+  diagnosticState.lastStep = "classify_lean";
+  diagnosticState.awaitingResponse = true;
+
+  return res.json({
+    reply:
+      "Before testing anything, classify the lean condition.\n\n" +
+      "Which applies?\n\n" +
+      "1) Bank 1 only\n" +
+      "2) Bank 2 only\n" +
+      "3) Both banks\n\n" +
+      "Reply with ONLY the number.",
+    vehicle: mergeVehicleContexts(vehicleContext, {})
+  });
+}
+
+// 🚨 EVAP FIRST-STEP GATE
+if (
+  diagnosticState.mode === "active" &&
+  !diagnosticState.lastStep &&
+  /(evap|p04|large leak|small leak|purge|vent)/i.test(message)
+) {
+  diagnosticState.lastStep = "classify_evap";
+  diagnosticState.awaitingResponse = true;
+
+  return res.json({
+    reply:
+      "Before diagnosing EVAP, classify the fault.\n\n" +
+      "Which best fits?\n\n" +
+      "1) Large leak\n" +
+      "2) Small leak\n" +
+      "3) Purge or vent performance\n\n" +
+      "Reply with ONLY the number.",
+    vehicle: mergeVehicleContexts(vehicleContext, {})
+  });
+}
+
+
+// 🚨 CHARGING SYSTEM FIRST-STEP GATE
+if (
+  diagnosticState.mode === "active" &&
+  !diagnosticState.lastStep &&
+  /(battery light|charging system|alternator|overcharging|no charge|low voltage)/i.test(message)
+) {
+  diagnosticState.lastStep = "classify_charging";
+  diagnosticState.awaitingResponse = true;
+
+  return res.json({
+    reply:
+      "Before testing the charging system, classify the issue.\n\n" +
+      "Which applies?\n\n" +
+      "1) Battery light on\n" +
+      "2) Dead battery repeatedly\n" +
+      "3) Confirmed no-charge condition\n" +
+      "4) Voltage over 15V\n\n" +
+      "Reply with ONLY the number.",
+    vehicle: mergeVehicleContexts(vehicleContext, {})
+  });
+}
+
+
+// 🚨 NETWORK / U-CODE FIRST-STEP GATE
+if (
+  diagnosticState.mode === "active" &&
+  !diagnosticState.lastStep &&
+  /(u0|u1|lost communication|network code|can bus)/i.test(message)
+) {
+  diagnosticState.lastStep = "classify_network";
+  diagnosticState.awaitingResponse = true;
+
+  return res.json({
+    reply:
+      "Before diagnosing network faults, classify the scope.\n\n" +
+      "Which applies?\n\n" +
+      "1) Single module reporting loss of communication\n" +
+      "2) Multiple modules reporting communication faults\n\n" +
+      "Reply with ONLY the number.",
+    vehicle: mergeVehicleContexts(vehicleContext, {})
+  });
+}
+
+// 🚨 NOISE FIRST-STEP GATE
+if (
+  diagnosticState.mode === "active" &&
+  !diagnosticState.lastStep &&
+  /(noise|rattle|knock|clunk|whine|grinding|squeal)/i.test(message)
+) {
+  diagnosticState.lastStep = "classify_noise";
+  diagnosticState.awaitingResponse = true;
+
+  return res.json({
+    reply:
+      "Before diagnosing noise, classify it.\n\n" +
+      "What best describes it?\n\n" +
+      "1) Engine internal\n" +
+      "2) Accessory / belt\n" +
+      "3) Suspension / steering\n" +
+      "4) Drivetrain\n" +
+      "5) Brakes\n\n" +
+      "Reply with ONLY the number.",
+    vehicle: mergeVehicleContexts(vehicleContext, {})
+  });
+}
+
+
+// 🚨 BRAKE FIRST-STEP GATE
+if (
+  diagnosticState.mode === "active" &&
+  !diagnosticState.lastStep &&
+  /(brake|abs|pedal|grinding|pulling|soft pedal|hard pedal)/i.test(message)
+) {
+  diagnosticState.lastStep = "classify_brakes";
+  diagnosticState.awaitingResponse = true;
+
+  return res.json({
+    reply:
+      "Before diagnosing brakes, classify the complaint.\n\n" +
+      "Which applies?\n\n" +
+      "1) Pedal feel issue\n" +
+      "2) Noise\n" +
+      "3) Warning light (ABS / brake)\n\n" +
+      "Reply with ONLY the number.",
+    vehicle: mergeVehicleContexts(vehicleContext, {})
+  });
+}
+
+// 🚨 TRANSMISSION / DRIVABILITY FIRST-STEP GATE
+if (
+  diagnosticState.mode === "active" &&
+  !diagnosticState.lastStep &&
+  /(transmission|slipping|harsh shift|no movement|delayed engagement|won't shift)/i.test(message)
+) {
+  diagnosticState.lastStep = "classify_transmission";
+  diagnosticState.awaitingResponse = true;
+
+  return res.json({
+    reply:
+      "Before diagnosing transmission issues, classify the symptom.\n\n" +
+      "Which applies?\n\n" +
+      "1) Harsh or delayed shifts\n" +
+      "2) Slipping\n" +
+      "3) No movement\n" +
+      "4) Delayed engagement\n\n" +
+      "Reply with ONLY the number.",
+    vehicle: mergeVehicleContexts(vehicleContext, {})
+  });
+}
+
+
+
+
+
+
 
     // 3️⃣ Vehicle extraction
     const extracted = await extractVehicleFromText(message);
@@ -700,13 +924,25 @@ if (quick) {
     // 5️⃣ Diagnostic behavior rules
   let diagnosticInstructions = "";
 if (diagnosticState.mode === "active") {
-  diagnosticInstructions = `
+diagnosticInstructions = `
 DIAGNOSTIC MODE ACTIVE:
 - Provide ONLY ONE test or check per message
 - End every response with a direct question
 - Wait for user confirmation before continuing
+
+- If the condition is "no start", the FIRST response must ONLY classify crank vs no-crank.
+- Do NOT list tests, procedures, or causes until classification is confirmed.
+
+- If the condition is overheating, the FIRST response must ONLY classify WHEN it overheats.
+- Do NOT list causes or tests until classification is confirmed.
+
+- Certain conditions REQUIRE classification before testing (no-start, overheating, misfire, lean, EVAP, charging, network, noise, brakes, transmission).
+- If classification is required, do NOT list tests, causes, or procedures.
+
+
 - Current diagnostic step: ${diagnosticState.lastStep || "initial"}
 `;
+
 }
 
 // 🧠 Detect GRIT-issued test prompts (bind intent from GRIT, not user)
