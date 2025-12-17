@@ -778,7 +778,6 @@ if (Array.isArray(context)) {
     content: "Previous diagnostic test confirmed. Proceeding logically."
   });
 }
-}
 
 // 2️⃣ Enter diagnostic mode
 if (
