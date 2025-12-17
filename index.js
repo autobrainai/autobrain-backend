@@ -541,9 +541,11 @@ async function decodeVinWithCache(vinRaw) {
 // ------------------------------------------------------
 let diagnosticState = {
   mode: "idle",            // "idle" | "active"
-  lastStep: null,          // e.g. "fuel_pressure_koeo"
+  lastStep: null,          // e.g. "awaiting_test_result"
+  expectedTest: null,      // 👈 ADD THIS
   awaitingResponse: false
 };
+
 
 // ------------------------------------------------------
 // DIAGNOSTIC STEP MAP (MVP v1)
@@ -570,11 +572,14 @@ app.post("/decode-vin", async (req, res) => {
     const decoded = await decodeVinWithCache(req.body.vin);
     let merged = mergeVehicleContexts(req.body.vehicleContext, decoded);
     merged.engine = inferEngineStringFromYMM(merged);
+
 diagnosticState = {
   mode: "idle",
   lastStep: null,
+  expectedTest: null,  
   awaitingResponse: false
 };
+
 
 res.json({ vehicle: merged });
 
@@ -591,11 +596,34 @@ res.json({ vehicle: merged });
 function classifyTechResponse(message) {
   const m = message.toLowerCase().trim();
 
-  if (/(^|\b)(pass|passed|good|ok|okay|normal)(\b|$)/i.test(m)) return "pass";
-  if (/(^|\b)(fail|failed|bad|no|not|zero)(\b|$)/i.test(m)) return "fail";
+  // ✅ PASS / COMPLETED
+  if (
+   /(^|\b)(pass|passed|good|ok|okay|normal|yes|done|checked|tested|looks good|seems fine|within spec|verified|confirmed)(\b|$)/ix.test(m)
+  ) {
+    return "pass";
+  }
 
+if (
+  diagnosticState.awaitingResponse &&
+  /(checked|measured|found|showed|reading|was|were)/i.test(m) &&
+  /(oil|carbon|crack|fouled|burnt|worn|gap|resistance|voltage)/i.test(m)
+) {
+  return "pass";
+}
+
+
+  // ❌ FAIL / NOT DONE
+  if (
+   /(^|\b)(fail|failed|bad|no|nope|nah|negative|zero|not yet|not done|did not|didn't|haven't|have not|haven't checked|haven't tested|haven't verified|not checked|not tested|not sure yet|don't know yet|idk yet)(\b|$)/ix.test(m)
+  ) {
+    return "fail";
+  }
+
+  // 🤷 Ambiguous → do nothing
   return null;
 }
+
+
 
 app.post("/chat", async (req, res) => {
   try {
@@ -609,13 +637,23 @@ if (diagnosticState.awaitingResponse && diagnosticState.lastStep) {
 
   const result = classifyTechResponse(message);
 
-  if (result && DIAGNOSTIC_STEPS[diagnosticState.lastStep]) {
-    diagnosticState.lastStep =
-      DIAGNOSTIC_STEPS[diagnosticState.lastStep][result] || null;
+if (result && DIAGNOSTIC_STEPS[diagnosticState.lastStep]) {
+  diagnosticState.lastStep =
+    DIAGNOSTIC_STEPS[diagnosticState.lastStep][result] || null;
 
-    diagnosticState.awaitingResponse = false;
-  }
+  diagnosticState.awaitingResponse = false;
+  diagnosticState.expectedTest = null;
+
+  // 🧠 Acknowledge test completion
+if (Array.isArray(context)) {
+  context.push({
+    role: "system",
+    content: "Previous diagnostic test confirmed. Proceeding logically."
+  });
+
 }
+}
+
 
 
 
@@ -640,11 +678,21 @@ if (
     let mergedVehicle = mergeVehicleContexts(vehicleContext, extracted);
     mergedVehicle.engine = inferEngineStringFromYMM(mergedVehicle);
 
+
+
+
+
+
     // 4️⃣ Short-circuit replies
-    const quick = buildGritResponse(message, mergedVehicle);
-    if (quick) {
-      return res.json({ reply: quick, vehicle: mergedVehicle });
-    }
+const quick =
+  diagnosticState.mode !== "active"
+    ? buildGritResponse(message, mergedVehicle)
+    : null;
+
+if (quick) {
+  return res.json({ reply: quick, vehicle: mergedVehicle });
+}
+
 
     // 5️⃣ Diagnostic behavior rules
   let diagnosticInstructions = "";
@@ -657,6 +705,53 @@ DIAGNOSTIC MODE ACTIVE:
 - Current diagnostic step: ${diagnosticState.lastStep || "initial"}
 `;
 }
+
+// 🧠 Detect GRIT-issued test prompts (bind intent from GRIT, not user)
+const lastAssistantMessage =
+  context?.length
+    ? context[context.length - 1]?.content || ""
+    : "";
+
+if (
+  diagnosticState.mode === "active" &&
+  !diagnosticState.awaitingResponse &&
+  !diagnosticState.expectedTest
+) {
+  if (/exhaust leak/i.test(lastAssistantMessage)) {
+    diagnosticState.expectedTest = "exhaust_leak_check";
+  }
+
+  if (/vacuum leak/i.test(lastAssistantMessage)) {
+    diagnosticState.expectedTest = "vacuum_leak_check";
+  }
+
+  if (/fuel pressure/i.test(lastAssistantMessage)) {
+    diagnosticState.expectedTest = "fuel_pressure_test";
+  }
+
+  if (/o2 sensor|oxygen sensor/i.test(lastAssistantMessage)) {
+    diagnosticState.expectedTest = "o2_sensor_check";
+  }
+}
+
+
+
+
+// 🚫 Prevent diagnostic drift between systems
+
+if (
+  diagnosticState.awaitingResponse &&
+  diagnosticState.expectedTest === "exhaust_leak_check" &&
+  /vacuum/i.test(message)
+) {
+  return res.json({
+    reply:
+      "Hold up — we are still verifying the exhaust system. Vacuum leaks come later.\n\nConfirm again: do you hear or feel ANY exhaust leak upstream of the catalytic converter?",
+    vehicle: mergedVehicle
+  });
+}
+
+
 
 
     // 6️⃣ AI response
@@ -791,6 +886,7 @@ app.post("/reset-diagnostic", (req, res) => {
   diagnosticState = {
     mode: "idle",
     lastStep: null,
+expectedTest: null, 
     awaitingResponse: false
   };
 
