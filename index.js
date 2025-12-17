@@ -598,7 +598,8 @@ function classifyTechResponse(message) {
 
   // ✅ PASS / COMPLETED
   if (
-   /(^|\b)(pass|passed|good|ok|okay|normal|yes|done|checked|tested|looks good|seems fine|within spec|verified|confirmed)(\b|$)/ix.test(m)
+ /(^|\b)(pass|passed|good|ok|okay|normal|yes|done|checked|tested|looks good|seems fine|within spec|verified|confirmed)(\b|$)/i.test(m)
+
   ) {
     return "pass";
   }
@@ -614,7 +615,8 @@ if (
 
   // ❌ FAIL / NOT DONE
   if (
-   /(^|\b)(fail|failed|bad|no|nope|nah|negative|zero|not yet|not done|did not|didn't|haven't|have not|haven't checked|haven't tested|haven't verified|not checked|not tested|not sure yet|don't know yet|idk yet)(\b|$)/ix.test(m)
+  /(^|\b)(fail|failed|bad|no|nope|nah|negative|zero|not yet|not done|did not|didn't|haven't|have not|haven't checked|haven't tested|haven't verified|not checked|not tested|not sure yet|don't know yet|idk yet)(\b|$)/i.test(m)
+
   ) {
     return "fail";
   }
