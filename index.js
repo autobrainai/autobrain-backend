@@ -680,7 +680,7 @@ const SAFETY_WARNINGS = [
     warning:
       "⚠️ Safety: High voltage can be lethal. Do not touch/probe orange HV cables without PPE + disable + verify zero volts."
   }
-}
+]
 
 // ------------------------------------------------------
 // SAFETY ENGINE — Hard stops (Layer 3)
