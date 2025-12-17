@@ -540,12 +540,18 @@ async function decodeVinWithCache(vinRaw) {
 // DIAGNOSTIC STATE (v1 — in-memory, MVP-safe)
 // ------------------------------------------------------
 let diagnosticState = {
-  mode: "idle",            
-  lastStep: null,          
-  expectedTest: null,      
+  mode: "idle",
+  lastStep: null,
+  expectedTest: null,
   awaitingResponse: false,
-disclaimerSent: false
+  disclaimerSent: false,
+  classification: {
+    misfire: null
+    // example once locked:
+    // { cylinder: 3, type: "single", condition: "idle" }
+  }
 };
+
 
 
 // ------------------------------------------------------
@@ -577,10 +583,14 @@ app.post("/decode-vin", async (req, res) => {
 diagnosticState = {
   mode: "idle",
   lastStep: null,
-  expectedTest: null,  
+  expectedTest: null,
   awaitingResponse: false,
-disclaimerSent: false
+  disclaimerSent: false,
+  classification: {
+    misfire: null
+  }
 };
+
 
 
 res.json({ vehicle: merged });
@@ -780,6 +790,34 @@ if (Array.isArray(context)) {
 }
 }
 
+// 🔒 LOCK MISFIRE CLASSIFICATION (ONE-TIME)
+if (
+  diagnosticState.lastStep === "classify_misfire" &&
+  diagnosticState.awaitingResponse
+) {
+  // Infer single vs multiple + condition
+  const isSingle = /single/i.test(message) || /p030\d/i.test(message);
+  const condition =
+    /idle/i.test(message)
+      ? "idle"
+      : /load|accel|driving/i.test(message)
+      ? "load"
+      : "unknown";
+
+  // Infer cylinder if provided (P030X)
+  const cylMatch = message.match(/p030(\d)/i);
+
+  diagnosticState.classification.misfire = {
+    type: isSingle ? "single" : "multiple",
+    condition,
+    cylinder: cylMatch ? Number(cylMatch[1]) : null
+  };
+
+  diagnosticState.lastStep = "misfire_confirmed";
+  diagnosticState.awaitingResponse = false;
+}
+
+
 // 2️⃣ Enter diagnostic mode
 if (
   /\b(p0|p1|u0|b0|c0)\d{3}\b/i.test(message) ||
@@ -841,9 +879,10 @@ if (
 // 🚨 MISFIRE FIRST-STEP GATE
 if (
   diagnosticState.mode === "active" &&
-  !diagnosticState.lastStep &&
+  !diagnosticState.classification?.misfire &&
   /misfire|misfiring|rough idle|shaking/i.test(message)
 ) {
+
   diagnosticState.lastStep = "classify_misfire";
   diagnosticState.awaitingResponse = true;
 
@@ -1252,13 +1291,16 @@ app.post("/send-feedback", async (req, res) => {
 // RESET DIAGNOSTIC STATE
 // ------------------------------------------------------
 app.post("/reset-diagnostic", (req, res) => {
-  diagnosticState = {
-    mode: "idle",
-    lastStep: null,
-expectedTest: null, 
-    awaitingResponse: false,
-disclaimerSent: false
-  };
+diagnosticState = {
+  mode: "idle",
+  lastStep: null,
+  expectedTest: null,
+  awaitingResponse: false,
+  disclaimerSent: false,
+  classification: {
+    misfire: null
+  }
+};
 
   res.json({ status: "diagnostic_state_reset" });
 });
