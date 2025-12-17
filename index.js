@@ -546,7 +546,7 @@ let diagnosticState = {
   awaitingResponse: false,
   disclaimerSent: false,
   classification: {
-    misfire: null
+    misfire: null,
     smoke: null
   }
 };
@@ -586,7 +586,8 @@ diagnosticState = {
   awaitingResponse: false,
   disclaimerSent: false,
   classification: {
-    misfire: null
+    misfire: null,
+smoke: null
   }
 };
 
@@ -1349,7 +1350,7 @@ diagnosticState = {
   awaitingResponse: false,
   disclaimerSent: false,
   classification: {
-    misfire: null
+    misfire: null,
     smoke: null
   }
 };
