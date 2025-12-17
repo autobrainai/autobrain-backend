@@ -545,6 +545,22 @@ let diagnosticState = {
   awaitingResponse: false
 };
 
+// ------------------------------------------------------
+// DIAGNOSTIC STEP MAP (MVP v1)
+// ------------------------------------------------------
+const DIAGNOSTIC_STEPS = {
+  awaiting_test_result: {
+    pass: "next_logical_test",
+    fail: "failure_path_analysis"
+  },
+
+  fuel_pressure_koeo: {
+    pass: "fuel_trim_analysis",
+    fail: "fuel_supply_diagnostics"
+  }
+};
+
+
 
 // ------------------------------------------------------
 // POST /decode-vin
@@ -571,39 +587,53 @@ res.json({ vehicle: merged });
 // ------------------------------------------------------
 // POST /chat
 // ------------------------------------------------------
+
+function classifyTechResponse(message) {
+  const m = message.toLowerCase().trim();
+
+  if (/(^|\b)(pass|passed|good|ok|okay|normal)(\b|$)/i.test(m)) return "pass";
+  if (/(^|\b)(fail|failed|bad|no|not|zero)(\b|$)/i.test(m)) return "fail";
+
+  return null;
+}
+
 app.post("/chat", async (req, res) => {
   try {
     const { message, context, vehicleContext } = req.body;
     const lower = message.toLowerCase();
 
-    // 1️⃣ Clear waiting ONLY on tech-style confirmation
- if (
-  diagnosticState.awaitingResponse &&
-  /(^|\b)(ok|okay|done|checked|yes|no|pass|fail|good|bad|fine|normal)(\b|$)/i.test(message)
-) {
-  diagnosticState.awaitingResponse = false;
+
+// 1️⃣ Handle tech confirmation + branching
+if (diagnosticState.awaitingResponse && diagnosticState.lastStep) {
+
+
+  const result = classifyTechResponse(message);
+
+  if (result && DIAGNOSTIC_STEPS[diagnosticState.lastStep]) {
+    diagnosticState.lastStep =
+      DIAGNOSTIC_STEPS[diagnosticState.lastStep][result] || null;
+
+    diagnosticState.awaitingResponse = false;
+  }
 }
 
-// OPTIONAL SAFETY — stay in diagnostic mode unless a new trigger appears
+
+
+
+// 2️⃣ Enter diagnostic mode
 if (
-  diagnosticState.mode === "active" &&
-  !/\b(p0|p1|u0|b0|c0)\d{3}\b/i.test(message) &&
-  !lower.includes("check engine") &&
-  !lower.includes("diagnose")
+  /\b(p0|p1|u0|b0|c0)\d{3}\b/i.test(message) ||
+  lower.includes("check engine") ||
+  lower.includes("diagnose")
 ) {
-  // stay active — do nothing (default)
+  diagnosticState.mode = "active";
+
+  // Initialize diagnostic flow only once
+  if (!diagnosticState.lastStep) {
+    diagnosticState.lastStep = "awaiting_test_result";
+  }
 }
 
-
-
-    // 2️⃣ Enter diagnostic mode
-    if (
-      /\b(p0|p1|u0|b0|c0)\d{3}\b/i.test(message) ||
-      lower.includes("check engine") ||
-      lower.includes("diagnose")
-    ) {
-      diagnosticState.mode = "active";
-    }
 
     // 3️⃣ Vehicle extraction
     const extracted = await extractVehicleFromText(message);
@@ -617,15 +647,17 @@ if (
     }
 
     // 5️⃣ Diagnostic behavior rules
-    let diagnosticInstructions = "";
-    if (diagnosticState.mode === "active") {
-      diagnosticInstructions = `
+  let diagnosticInstructions = "";
+if (diagnosticState.mode === "active") {
+  diagnosticInstructions = `
 DIAGNOSTIC MODE ACTIVE:
 - Provide ONLY ONE test or check per message
 - End every response with a direct question
 - Wait for user confirmation before continuing
+- Current diagnostic step: ${diagnosticState.lastStep || "initial"}
 `;
-    }
+}
+
 
     // 6️⃣ AI response
     const ai = await openai.chat.completions.create({
@@ -649,11 +681,11 @@ ${JSON.stringify(mergedVehicle)}
       ]
     });
 
-    // 7️⃣ Only lock waiting state if diagnosing
-    if (diagnosticState.mode === "active") {
-      diagnosticState.awaitingResponse = true;
-      diagnosticState.lastStep = "awaiting_test_result";
-    }
+// 7️⃣ Only lock waiting state when a diagnostic step exists
+if (diagnosticState.mode === "active" && diagnosticState.lastStep) {
+  diagnosticState.awaitingResponse = true;
+}
+
 
     res.json({
       reply: ai.choices[0].message.content,
