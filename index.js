@@ -680,7 +680,7 @@ const SAFETY_WARNINGS = [
     warning:
       "⚠️ Safety: High voltage can be lethal. Do not touch/probe orange HV cables without PPE + disable + verify zero volts."
   }
-}
+
 
 // ------------------------------------------------------
 // SAFETY ENGINE — Hard stops (Layer 3)
@@ -732,9 +732,54 @@ function collectSafetyWarnings(textBlocks = []) {
 }
 
 app.post("/chat", async (req, res) => {
-  res.json({ status: "chat temporarily disabled" });
-});
+  try {
+    const { message, context, vehicleContext } = req.body;
+    const lower = message.toLowerCase();
 
+// 🧯 Layer 3: Hard stop if user requests dangerous action
+const hardStop = checkSafetyHardStop(message);
+if (hardStop) {
+  return res.json({
+    reply: hardStop,
+    vehicle: mergeVehicleContexts(vehicleContext, {})
+  });
+}
+
+
+// 🛡️ GLOBAL SAFETY DISCLAIMER (show once per session)
+let globalSafetyDisclaimer = "";
+if (!diagnosticState.disclaimerSent) {
+  diagnosticState.disclaimerSent = true;
+  globalSafetyDisclaimer =
+    "⚠️ Safety: AutoBrain GRIT provides diagnostic guidance for trained technicians. " +
+    "Follow OEM procedures and shop safety standards. Use proper PPE. " +
+    "If unsure or unsafe, stop and verify.\n\n";
+}
+
+
+
+// 1️⃣ Handle tech confirmation + branching
+if (diagnosticState.awaitingResponse && diagnosticState.lastStep) {
+
+
+  const result = classifyTechResponse(message);
+
+if (result && DIAGNOSTIC_STEPS[diagnosticState.lastStep]) {
+  diagnosticState.lastStep =
+    DIAGNOSTIC_STEPS[diagnosticState.lastStep][result] || null;
+
+  diagnosticState.awaitingResponse = false;
+  diagnosticState.expectedTest = null;
+
+  // 🧠 Acknowledge test completion
+if (Array.isArray(context)) {
+  context.push({
+    role: "system",
+    content: "Previous diagnostic test confirmed. Proceeding logically."
+  });
+}
+}
+}
 
 // 2️⃣ Enter diagnostic mode
 if (
