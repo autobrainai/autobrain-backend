@@ -537,6 +537,16 @@ async function decodeVinWithCache(vinRaw) {
 }
 
 // ------------------------------------------------------
+// DIAGNOSTIC STATE (v1 — in-memory, MVP-safe)
+// ------------------------------------------------------
+let diagnosticState = {
+  mode: "idle",            // "idle" | "active"
+  lastStep: null,          // e.g. "fuel_pressure_koeo"
+  awaitingResponse: false
+};
+
+
+// ------------------------------------------------------
 // POST /decode-vin
 // ------------------------------------------------------
 app.post("/decode-vin", async (req, res) => {
@@ -544,7 +554,15 @@ app.post("/decode-vin", async (req, res) => {
     const decoded = await decodeVinWithCache(req.body.vin);
     let merged = mergeVehicleContexts(req.body.vehicleContext, decoded);
     merged.engine = inferEngineStringFromYMM(merged);
-    res.json({ vehicle: merged });
+diagnosticState = {
+  mode: "idle",
+  lastStep: null,
+  awaitingResponse: false
+};
+
+res.json({ vehicle: merged });
+
+
   } catch {
     res.status(500).json({ error: "VIN decode error" });
   }
@@ -556,18 +574,60 @@ app.post("/decode-vin", async (req, res) => {
 app.post("/chat", async (req, res) => {
   try {
     const { message, context, vehicleContext } = req.body;
+    const lower = message.toLowerCase();
 
+    // 1️⃣ Clear waiting ONLY on tech-style confirmation
+ if (
+  diagnosticState.awaitingResponse &&
+  /(^|\b)(ok|okay|done|checked|yes|no|pass|fail|good|bad|fine|normal)(\b|$)/i.test(message)
+) {
+  diagnosticState.awaitingResponse = false;
+}
+
+// OPTIONAL SAFETY — stay in diagnostic mode unless a new trigger appears
+if (
+  diagnosticState.mode === "active" &&
+  !/\b(p0|p1|u0|b0|c0)\d{3}\b/i.test(message) &&
+  !lower.includes("check engine") &&
+  !lower.includes("diagnose")
+) {
+  // stay active — do nothing (default)
+}
+
+
+
+    // 2️⃣ Enter diagnostic mode
+    if (
+      /\b(p0|p1|u0|b0|c0)\d{3}\b/i.test(message) ||
+      lower.includes("check engine") ||
+      lower.includes("diagnose")
+    ) {
+      diagnosticState.mode = "active";
+    }
+
+    // 3️⃣ Vehicle extraction
     const extracted = await extractVehicleFromText(message);
     let mergedVehicle = mergeVehicleContexts(vehicleContext, extracted);
     mergedVehicle.engine = inferEngineStringFromYMM(mergedVehicle);
 
-    // Quick short response
+    // 4️⃣ Short-circuit replies
     const quick = buildGritResponse(message, mergedVehicle);
     if (quick) {
       return res.json({ reply: quick, vehicle: mergedVehicle });
     }
 
-    // AI Response with full GRIT RULESET
+    // 5️⃣ Diagnostic behavior rules
+    let diagnosticInstructions = "";
+    if (diagnosticState.mode === "active") {
+      diagnosticInstructions = `
+DIAGNOSTIC MODE ACTIVE:
+- Provide ONLY ONE test or check per message
+- End every response with a direct question
+- Wait for user confirmation before continuing
+`;
+    }
+
+    // 6️⃣ AI response
     const ai = await openai.chat.completions.create({
       model: "gpt-4.1",
       temperature: 0.3,
@@ -575,9 +635,9 @@ app.post("/chat", async (req, res) => {
         {
           role: "system",
           content: `
-You are GRIT — a ruthless diagnostic mentor for technicians.
-You must strictly follow the rules below:
+You are GRIT — a ruthless diagnostic mentor.
 
+${diagnosticInstructions}
 ${GRIT_RULESET}
 
 Vehicle Context:
@@ -589,14 +649,22 @@ ${JSON.stringify(mergedVehicle)}
       ]
     });
 
+    // 7️⃣ Only lock waiting state if diagnosing
+    if (diagnosticState.mode === "active") {
+      diagnosticState.awaitingResponse = true;
+      diagnosticState.lastStep = "awaiting_test_result";
+    }
+
     res.json({
       reply: ai.choices[0].message.content,
       vehicle: mergedVehicle
     });
+
   } catch (err) {
     res.status(500).json({ error: "Chat error" });
   }
 });
+
 
 // ------------------------------------------------------
 // POST /diagnostic-tree
@@ -684,6 +752,18 @@ app.post("/send-feedback", async (req, res) => {
 });
 
 
+// ------------------------------------------------------
+// RESET DIAGNOSTIC STATE
+// ------------------------------------------------------
+app.post("/reset-diagnostic", (req, res) => {
+  diagnosticState = {
+    mode: "idle",
+    lastStep: null,
+    awaitingResponse: false
+  };
+
+  res.json({ status: "diagnostic_state_reset" });
+});
 
 
 // ------------------------------------------------------
