@@ -776,7 +776,7 @@ if (Array.isArray(context)) {
     role: "system",
     content: "Previous diagnostic test confirmed. Proceeding logically."
   });
-
+}
 }
 }
 
