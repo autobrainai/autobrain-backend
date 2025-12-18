@@ -30,10 +30,50 @@ const DIAGNOSTIC_STEPS = {
 };
 
 /* ======================================================
+   DTC AUTO-CLASSIFIERS (CRITICAL)
+====================================================== */
+function extractMisfireFromDTC(message) {
+  const single = message.match(/p030([1-8])/i);
+  if (single) {
+    return {
+      type: "single",
+      cylinder: Number(single[1])
+    };
+  }
+
+  if (/p0300/i.test(message)) {
+    return { type: "multiple" };
+  }
+
+  return null;
+}
+
+function extractLeanFromDTC(message) {
+  if (/p0171/i.test(message)) return { banks: "bank1" };
+  if (/p0174/i.test(message)) return { banks: "bank2" };
+  if (/p0171.*p0174|p0174.*p0171/i.test(message))
+    return { banks: "both" };
+  return null;
+}
+
+function extractEvapFromDTC(message) {
+  if (/p0455|large leak/i.test(message)) return "large";
+  if (/p0456|small leak/i.test(message)) return "small";
+  if (/p0443|purge|vent/i.test(message)) return "purge_or_vent";
+  return null;
+}
+
+function extractNetworkFromDTC(message) {
+  if (/u0\d{3}/i.test(message)) return "network";
+  return null;
+}
+
+/* ======================================================
    Extract vehicle from technician text
 ====================================================== */
 async function extractVehicleFromText(message) {
   try {
+    const openai = getOpenAI();
     const resp = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
       temperature: 0,
@@ -145,47 +185,52 @@ export async function runGrit({ message, context = [], vehicleContext = {} }) {
   }
 
   /* ---------- ENTER DIAGNOSTIC MODE ---------- */
-  if (
-    /\b(p0|p1|u0|b0|c0)\d{3}\b/i.test(message) ||
-    lower.includes("check engine") ||
-    lower.includes("diagnose")
-  ) {
+  if (/\b(p0|p1|u0|b0|c0)\d{3}\b/i.test(message)) {
     diagnosticState.mode = "active";
   }
 
-  /* ---------- CLASSIFICATION GATES ---------- */
-  if (diagnosticState.mode === "active" && !diagnosticState.lastStep) {
-    if (/no start/i.test(message)) {
-      diagnosticState.lastStep = "classify_crank";
-      diagnosticState.awaitingResponse = true;
+  /* ---------- AUTO DTC CLASSIFICATION ---------- */
+  if (!diagnosticState.lastStep) {
+    const misfire = extractMisfireFromDTC(message);
+    if (misfire) {
+      diagnosticState.classification.misfire = misfire;
       return {
         reply:
-          "Before testing, classify the failure:\n\n" +
-          "1) Cranks but will not start\n" +
-          "2) No crank\n\nReply with ONLY one.",
+          `Misfire classification locked (${misfire.type}${misfire.cylinder ? ` — cylinder ${misfire.cylinder}` : ""}).\n\n` +
+          `When does it occur?\n• Idle\n• Under load\n• Cold start\n• All the time`,
         vehicle: mergedVehicle
       };
     }
 
-    if (/overheat|overheating|running hot/i.test(message)) {
-      diagnosticState.lastStep = "classify_overheat";
-      diagnosticState.awaitingResponse = true;
+    const lean = extractLeanFromDTC(message);
+    if (lean) {
+      diagnosticState.classification.lean = lean;
       return {
         reply:
-          "Classify the overheating condition:\n\n" +
-          "1) Idle only\n2) Driving\n3) Highway/load\n4) Immediately after startup\n5) Gauge only\n\nReply with the number.",
+          `Lean condition confirmed (${lean.banks}).\n\n` +
+          `Is this at idle, cruise, or under load?`,
         vehicle: mergedVehicle
       };
     }
 
-    if (/misfire|rough idle|shaking/i.test(message)) {
-      diagnosticState.lastStep = "classify_misfire";
-      diagnosticState.awaitingResponse = true;
+    const evap = extractEvapFromDTC(message);
+    if (evap) {
+      diagnosticState.classification.evap = evap;
       return {
         reply:
-          "Classify the misfire:\n\n" +
-          "1) Single cylinder\n2) Multiple/random\n" +
-          "When does it occur?\n\nReply briefly.",
+          `EVAP fault type confirmed (${evap}).\n\n` +
+          `Has the gas cap and purge/vent been visually verified yet?`,
+        vehicle: mergedVehicle
+      };
+    }
+
+    const network = extractNetworkFromDTC(message);
+    if (network) {
+      diagnosticState.classification.network = network;
+      return {
+        reply:
+          `Network fault detected.\n\n` +
+          `Is this a single-module U-code or multiple modules offline?`,
         vehicle: mergedVehicle
       };
     }
@@ -232,7 +277,7 @@ Current step: ${diagnosticState.lastStep || "initial"}
 
   /* ---------- AI RESPONSE ---------- */
   const openai = getOpenAI();
-const ai = await openai.chat.completions.create({
+  const ai = await openai.chat.completions.create({
     model: "gpt-4.1",
     temperature: 0.3,
     messages: [
