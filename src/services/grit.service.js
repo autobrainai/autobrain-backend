@@ -1507,9 +1507,13 @@ export async function runGrit({ message, context = [], vehicleContext = {} }) {
 
   /* ---------- ENTER DIAGNOSTIC MODE ---------- */
   const dtcs = extractDTCs(message);
-  if (dtcs.length || /\b(check engine|diagnose)\b/i.test(message)) {
-    diagnosticState.mode = "active";
-  }
+ if (
+  dtcs.length ||
+  /\b(check engine|diagnose|misfire|rough idle|no start|stall|overheat|noise)\b/i.test(message)
+) {
+  diagnosticState.mode = "active";
+}
+
 
   /* ---------- DOMAIN SELECTION (lock once) ---------- */
   const detectedDomain = detectDomain({ message, dtcs });
