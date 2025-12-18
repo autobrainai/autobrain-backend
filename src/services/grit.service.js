@@ -1009,11 +1009,26 @@ function consumeExpectedInputIfAnswered(message) {
     diagnosticState.lastStep = "misfire_classified";
 
     const mf = diagnosticState.classification.misfire || {};
-    return {
-      reply:
-        `Misfire confirmed (${mf.type || "unknown"}${mf.cylinder ? ` — cylinder ${mf.cylinder}` : ""}, ${mf.condition}).\n\n` +
-        `First test: Swap the ignition coil with another cylinder and see if the misfire follows.\n\nDid you do that yet?`
-    };
+    // 🔒 SCAN-FIRST GATE — do NOT waste time swapping parts without cylinder ID
+if (!mf.cylinder && mf.type !== "multiple") {
+  return {
+    reply:
+      `Misfire confirmed (${mf.condition}).\n\n` +
+      `Before swapping any parts, scan the vehicle for engine codes.\n\n` +
+      `• P0301–P0308 = tells us EXACTLY which cylinder is misfiring\n` +
+      `• P0300 = random/multiple misfire\n\n` +
+      `Once you have the codes, tell me what they are and we’ll move efficiently.\n\n` +
+      `If you don’t have a scan tool, most parts stores (AutoZone / O’Reilly) can pull basic engine codes for free.`
+  };
+}
+
+// ✅ Cylinder known → now physical testing makes sense
+return {
+  reply:
+    `Misfire confirmed (${mf.type}${mf.cylinder ? ` — cylinder ${mf.cylinder}` : ""}, ${mf.condition}).\n\n` +
+    `Now swap the ignition coil (and plug if needed) on cylinder ${mf.cylinder} with another cylinder and see if the misfire follows.\n\nDid you do that yet?`
+};
+
   }
 
   // LEAN band
