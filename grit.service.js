@@ -1,0 +1,267 @@
+// ===========================================================
+// AUTO BRAIN — GRIT SERVICE (RESET / STABLE BASELINE)
+// OPTION A — DETERMINISTIC MODE
+// ===========================================================
+
+import { getOpenAI } from "./openai.service.js";
+import { supabase } from "./supabase.service.js";
+import { GRIT_RULESET } from "../rules/grit.ruleset.js";
+
+import {
+  mergeVehicleContexts,
+  inferEngineStringFromYMM
+} from "../utils/vehicle.util.js";
+
+import {
+  checkSafetyHardStop,
+  collectSafetyWarnings
+} from "../utils/safety.util.js";
+
+import { diagnosticState } from "../state/diagnostic.state.js";
+
+/* ======================================================
+   INTERNAL HELPERS
+====================================================== */
+function normalize(msg = "") {
+  return String(msg || "").trim();
+}
+
+/* ======================================================
+   DTC EXTRACTION
+====================================================== */
+function extractDTCs(message) {
+  const m = normalize(message);
+  const codes = Array.from(m.matchAll(/\b([PBUC]\d{4})\b/gi)).map((x) =>
+    x[1].toUpperCase()
+  );
+  return [...new Set(codes)];
+}
+
+/* ======================================================
+   DOMAIN DETECTION (READ-ONLY)
+====================================================== */
+const DOMAINS = {
+  engine_drivability: "engine_drivability",
+  starting_charging: "starting_charging",
+  cooling: "cooling",
+  evap: "evap",
+  network: "network",
+  brakes_abs: "brakes_abs",
+  transmission: "transmission",
+  hvac: "hvac",
+  diesel_emissions: "diesel_emissions",
+  steering_suspension: "steering_suspension",
+  hybrid_ev: "hybrid_ev",
+  body_electrical: "body_electrical",
+  srs_airbag: "srs_airbag",
+  tpms: "tpms",
+  adas: "adas",
+  unknown: "unknown"
+};
+
+function detectDomain({ message, dtcs }) {
+  const m = normalize(message).toLowerCase();
+
+  if (dtcs.some((c) => /^U\d{4}$/i.test(c))) return DOMAINS.network;
+  if (dtcs.some((c) => /^C\d{4}$/i.test(c))) return DOMAINS.brakes_abs;
+  if (dtcs.some((c) => /^B\d{4}$/i.test(c))) return DOMAINS.body_electrical;
+
+  if (/(srs|airbag|clock spring)/i.test(m)) return DOMAINS.srs_airbag;
+  if (/(hybrid|ev|high voltage|orange cable)/i.test(m)) return DOMAINS.hybrid_ev;
+  if (/(evap|p04\d{2}|purge|vent)/i.test(m)) return DOMAINS.evap;
+  if (/(overheat|running hot|temp gauge)/i.test(m)) return DOMAINS.cooling;
+  if (/(no crank|no start|starter|battery light|alternator)/i.test(m))
+    return DOMAINS.starting_charging;
+  if (/(abs|traction|stabilitrak|brake)/i.test(m)) return DOMAINS.brakes_abs;
+  if (/(transmission|slip|harsh shift|no movement)/i.test(m))
+    return DOMAINS.transmission;
+  if (/(hvac|no heat|no a\/c|blower)/i.test(m)) return DOMAINS.hvac;
+  if (/(def|dpf|regen|soot|scr)/i.test(m)) return DOMAINS.diesel_emissions;
+  if (/(death wobble|track bar|tie rod|wander|clunk)/i.test(m))
+    return DOMAINS.steering_suspension;
+  if (/(tpms|tire pressure)/i.test(m)) return DOMAINS.tpms;
+  if (/(adas|lane keep|radar|camera)/i.test(m)) return DOMAINS.adas;
+
+  if (dtcs.some((c) => /^P\d{4}$/i.test(c))) return DOMAINS.engine_drivability;
+  if (/(misfire|rough idle|stall|smoke|lean)/i.test(m))
+    return DOMAINS.engine_drivability;
+
+  return DOMAINS.unknown;
+}
+
+/* ======================================================
+   FIRST-QUESTION GATES (ONLY QUESTION SOURCE)
+====================================================== */
+function firstQuestionGate({ message, dtcs }) {
+  const m = normalize(message).toLowerCase();
+
+  if (/no start/i.test(m)) {
+    diagnosticState.awaitingResponse = true;
+    return `Before any testing, classify the failure.
+
+When you turn the key:
+1) Does it CRANK but not start?
+2) Is it a NO-CRANK condition?
+
+Reply with one.`;
+  }
+
+  if (/overheat|running hot|temp gauge/i.test(m)) {
+    diagnosticState.awaitingResponse = true;
+    return `Classify the overheating condition:
+
+1) Idle / stopped
+2) Driving
+3) Highway / load
+4) Heats immediately after startup
+5) Gauge reads hot only
+
+Reply with the number.`;
+  }
+
+  if (
+    /misfire|p030[0-8]/i.test(m) ||
+    dtcs.some((c) => /^P030[0-8]$/i.test(c))
+  ) {
+    diagnosticState.awaitingResponse = true;
+    return `Classify the misfire:
+
+• Single cylinder or multiple/random?
+• Idle, load, cold, or all the time?
+
+Reply briefly.`;
+  }
+
+  if (/p0171|p0174|lean/i.test(m)) {
+    diagnosticState.awaitingResponse = true;
+    return `Lean condition detected.
+
+Which applies?
+1) Bank 1
+2) Bank 2
+3) Both banks
+
+Reply with the number.`;
+  }
+
+  if (/evap|p04\d{2}/i.test(m)) {
+    diagnosticState.awaitingResponse = true;
+    return `EVAP fault detected.
+
+Have you verified:
+• Gas cap seal/tightness
+• Visible purge/vent lines
+
+Yes or no?`;
+  }
+
+  return null;
+}
+
+/* ======================================================
+   SHORT NON-DIAGNOSTIC ACK
+====================================================== */
+function buildShortAck(msg, v) {
+  const lower = normalize(msg).toLowerCase();
+  const short = normalize(msg).split(/\s+/).length <= 6;
+
+  if (
+    !short ||
+    /(code|p0|misfire|no start|stall|noise|overheat)/i.test(lower) ||
+    !(v.year || v.make || v.model)
+  ) {
+    return null;
+  }
+
+  return `A ${v.year} ${v.make} ${v.model}. Noted.
+
+What’s the symptom?
+Codes?
+Mileage?
+When does it occur?`;
+}
+
+/* ======================================================
+   MAIN ENTRY
+====================================================== */
+export async function runGrit({ message, context = [], vehicleContext = {} }) {
+  const openai = getOpenAI();
+
+  /* ---------- HARD SAFETY STOP ---------- */
+  const hardStop = checkSafetyHardStop(message);
+  if (hardStop) {
+    return {
+      reply: hardStop,
+      vehicle: mergeVehicleContexts(vehicleContext, {})
+    };
+  }
+
+  /* ---------- VEHICLE CONTEXT ---------- */
+  let mergedVehicle = mergeVehicleContexts(vehicleContext, {});
+  mergedVehicle.engine = inferEngineStringFromYMM(mergedVehicle);
+
+  /* ---------- QUICK ACK ---------- */
+  if (diagnosticState.mode !== "active") {
+    const quick = buildShortAck(message, mergedVehicle);
+    if (quick) return { reply: quick, vehicle: mergedVehicle };
+  }
+
+  /* ---------- ENTER DIAGNOSTIC MODE ---------- */
+  const dtcs = extractDTCs(message);
+  if (
+    dtcs.length ||
+    /(check engine|diagnose|misfire|no start|overheat|noise)/i.test(message)
+  ) {
+    diagnosticState.mode = "active";
+  }
+
+  /* ---------- DOMAIN (READ-ONLY) ---------- */
+  if (!diagnosticState.domain) {
+    diagnosticState.domain = detectDomain({ message, dtcs });
+  }
+
+  /* ---------- FIRST QUESTION GATE ---------- */
+  if (!diagnosticState.awaitingResponse) {
+    const gate = firstQuestionGate({ message, dtcs });
+    if (gate) {
+      return { reply: gate, vehicle: mergedVehicle };
+    }
+  }
+
+  /* ---------- SAFETY WARNINGS ---------- */
+  const lastAssistant =
+    context?.length ? context[context.length - 1]?.content || "" : "";
+  const safetyWarnings = collectSafetyWarnings([message, lastAssistant]);
+
+  /* ---------- AI RESPONSE (EXPLANATION ONLY) ---------- */
+  const ai = await openai.chat.completions.create({
+    model: "gpt-4.1",
+    temperature: 0.3,
+    messages: [
+      {
+        role: "system",
+        content: `
+You are GRIT — a professional automotive diagnostic mentor.
+
+You may EXPLAIN or CLARIFY.
+You may NOT introduce new diagnostic questions unless explicitly instructed.
+
+${safetyWarnings.length ? safetyWarnings.join("\n") + "\n\n" : ""}
+ACTIVE DOMAIN (locked): ${diagnosticState.domain}
+
+${GRIT_RULESET}
+
+Vehicle Context:
+${JSON.stringify(mergedVehicle)}
+`
+      },
+      ...(context || []),
+      { role: "user", content: message }
+    ]
+  });
+
+  return {
+    reply: ai.choices[0].message.content,
+    vehicle: mergedVehicle
+  };
+}
