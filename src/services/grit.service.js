@@ -335,12 +335,12 @@ Before continuing:
    ✅ CONSUME MISFIRE LOAD RESPONSE (LOCKED)
 ====================================================== */
 if (
-  diagnosticState.awaitingResponse &&
   diagnosticState.primaryDTC &&
   /^P030[0-8]$/i.test(diagnosticState.primaryDTC) &&
   diagnosticState.classification.misfire &&
   !diagnosticState.classification.misfireLoad
-) {
+)
+ {
   diagnosticState.classification.misfireLoad = normalize(message);
 
   // 🔒 Advance diagnostic state
