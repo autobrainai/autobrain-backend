@@ -345,6 +345,7 @@ Before continuing:
     diagnosticState.classification.misfireLoad = normalize(message);
 diagnosticState.awaitingResponse = false;
 
+ diagnosticState.phase = "component_history";
 
     return {
       reply: `Understood — misfire occurs at ${message.toLowerCase()}.
