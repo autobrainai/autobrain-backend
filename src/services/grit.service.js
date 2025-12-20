@@ -307,10 +307,11 @@ Now that we understand what ${nextDTC} means, let’s start diagnosing it proper
   if (
     diagnosticState.awaitingResponse &&
     diagnosticState.primaryDTC &&
-    /^P030[0-8]$/i.test(diagnosticState.primaryDTC)
+    /^P030[0-8]$/i.test(diagnosticState.primaryDTC) &&
+    !diagnosticState.classification.misfire
   ) {
     diagnosticState.classification.misfire = normalize(message);
-    diagnosticState.awaitingResponse = true;
+    diagnosticState.awaitingResponse = false;
 
     return {
       reply: `Got it — misfire occurs ${message.toLowerCase()}.
