@@ -365,6 +365,56 @@ Yes or no.`,
   };
 }
 
+/* ======================================================
+   ✅ CONSUME COMPONENT HISTORY RESPONSE
+====================================================== */
+if (
+  diagnosticState.activePath === "misfire" &&
+  diagnosticState.phase === "component_history" &&
+  diagnosticState.awaitingResponse
+) {
+  const answer = normalize(message).toLowerCase();
+  diagnosticState.awaitingResponse = false;
+
+  if (answer.startsWith("y")) {
+    diagnosticState.phase = "component_swapped";
+
+    return {
+      reply: `Good to know.
+
+Since components have already been replaced, the next step is to verify whether the misfire follows the component or stays on cylinder ${diagnosticState.primaryDTC.slice(-1)}.
+
+Have you swapped the coil or plug with another cylinder to see if the misfire moved?
+
+Yes or no.`,
+      vehicle: mergedVehicle
+    };
+  }
+
+  if (answer.startsWith("n")) {
+    diagnosticState.phase = "original_components";
+
+    return {
+      reply: `Understood.
+
+Before replacing anything, we should confirm whether this is ignition, fuel, or mechanical.
+
+Next step:
+Have you checked spark on cylinder ${diagnosticState.primaryDTC.slice(-1)}?
+
+Yes or no.`,
+      vehicle: mergedVehicle
+    };
+  }
+
+  return {
+    reply: `Please answer yes or no so we can continue.`,
+    vehicle: mergedVehicle
+  };
+}
+
+
+
 
   /* ---------- DOMAIN (READ-ONLY) ---------- */
   if (!diagnosticState.domain) {
