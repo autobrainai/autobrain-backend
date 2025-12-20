@@ -421,3 +421,4 @@ return {
   reply: "Answer the last diagnostic question to continue.",
   vehicle: mergedVehicle
 };
+}
