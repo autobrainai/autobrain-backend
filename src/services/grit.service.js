@@ -366,7 +366,7 @@ Yes or no.`,
 }
 
 /* ======================================================
-   ✅ CONSUME COMPONENT HISTORY RESPONSE
+   ✅ CONSUME COMPONENT HISTORY RESPONSE (LOCKED)
 ====================================================== */
 if (
   diagnosticState.activePath === "misfire" &&
@@ -374,15 +374,19 @@ if (
   diagnosticState.awaitingResponse
 ) {
   const answer = normalize(message).toLowerCase();
+
+  // 🔒 Consume response once
   diagnosticState.awaitingResponse = false;
 
+  // ------------------------------------------
+  // YES / COMPONENT ALREADY REPLACED
+  // ------------------------------------------
   if (
-  answer.startsWith("y") ||
-  answer.includes("plug") ||
-  answer.includes("coil") ||
-  answer.includes("wire")
-) {
-
+    answer.startsWith("y") ||
+    answer.includes("plug") ||
+    answer.includes("coil") ||
+    answer.includes("wire")
+  ) {
     diagnosticState.phase = "component_swapped";
 
     return {
@@ -397,6 +401,9 @@ Yes or no.`,
     };
   }
 
+  // ------------------------------------------
+  // NO / ORIGINAL COMPONENTS
+  // ------------------------------------------
   if (answer.startsWith("n")) {
     diagnosticState.phase = "original_components";
 
@@ -413,11 +420,17 @@ Yes or no.`,
     };
   }
 
+  // ------------------------------------------
+  // INVALID RESPONSE
+  // ------------------------------------------
+  diagnosticState.awaitingResponse = true;
+
   return {
     reply: `Please answer yes or no so we can continue.`,
     vehicle: mergedVehicle
   };
 }
+
 
 /* ======================================================
    ✅ CONSUME COMPONENT SWAP RESPONSE
