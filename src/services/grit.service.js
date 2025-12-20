@@ -376,7 +376,13 @@ if (
   const answer = normalize(message).toLowerCase();
   diagnosticState.awaitingResponse = false;
 
-  if (answer.startsWith("y")) {
+  if (
+  answer.startsWith("y") ||
+  answer.includes("plug") ||
+  answer.includes("coil") ||
+  answer.includes("wire")
+) {
+
     diagnosticState.phase = "component_swapped";
 
     return {
