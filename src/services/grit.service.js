@@ -302,28 +302,52 @@ Now that we understand what ${nextDTC} means, let’s start diagnosing it proper
   }
 
   /* ======================================================
-     ✅ CONSUME DIAGNOSTIC RESPONSE (ADDED)
+     ✅ CONSUME DIAGNOSTIC RESPONSE (FIXED)
   ====================================================== */
-  if (diagnosticState.awaitingResponse) {
+  if (
+    diagnosticState.awaitingResponse &&
+    diagnosticState.primaryDTC &&
+    /^P030[0-8]$/i.test(diagnosticState.primaryDTC)
+  ) {
+    diagnosticState.classification.misfire = normalize(message);
     diagnosticState.awaitingResponse = false;
 
-    if (
-      diagnosticState.primaryDTC &&
-      /^P030[0-8]$/i.test(diagnosticState.primaryDTC)
-    ) {
-      diagnosticState.classification.misfire = normalize(message);
-
-      return {
-        reply: `Got it — misfire occurs ${message.toLowerCase()}.
+    return {
+      reply: `Got it — misfire occurs ${message.toLowerCase()}.
 
 Next step:
 We need to determine whether this is ignition, fuel, or mechanical.
 
 Before continuing:
 • Is the misfire worse at idle, under load, or both?`,
-        vehicle: mergedVehicle
-      };
-    }
+      vehicle: mergedVehicle
+    };
+  }
+
+  /* ======================================================
+     ✅ CONSUME MISFIRE LOAD RESPONSE (UNCHANGED)
+  ====================================================== */
+  if (
+    diagnosticState.primaryDTC &&
+    /^P030[0-8]$/i.test(diagnosticState.primaryDTC) &&
+    diagnosticState.classification.misfire &&
+    !diagnosticState.classification.misfireLoad
+  ) {
+    diagnosticState.classification.misfireLoad = normalize(message);
+
+    return {
+      reply: `Understood — misfire occurs at ${message.toLowerCase()}.
+
+Based on this pattern, we can narrow the direction:
+
+• Ignition issues often worsen under load  
+• Mechanical issues usually affect idle and load  
+• Fuel delivery problems can affect both
+
+Next question:
+Has any ignition component (spark plug, wire, coil) been replaced recently on cylinder ${diagnosticState.primaryDTC.slice(-1)}?`,
+      vehicle: mergedVehicle
+    };
   }
 
   /* ---------- DOMAIN (READ-ONLY) ---------- */
