@@ -331,36 +331,40 @@ Before continuing:
     };
   }
 
-  /* ======================================================
-     ✅ CONSUME MISFIRE LOAD RESPONSE (UNCHANGED)
-  ====================================================== */
-  if (
-  diagnosticState.awaitingResponse &&   // ✅ ADD THIS LINE
+/* ======================================================
+   ✅ CONSUME MISFIRE LOAD RESPONSE (LOCKED)
+====================================================== */
+if (
+  diagnosticState.awaitingResponse &&
   diagnosticState.primaryDTC &&
   /^P030[0-8]$/i.test(diagnosticState.primaryDTC) &&
   diagnosticState.classification.misfire &&
   !diagnosticState.classification.misfireLoad
 ) {
+  diagnosticState.classification.misfireLoad = normalize(message);
 
-    diagnosticState.classification.misfireLoad = normalize(message);
-diagnosticState.awaitingResponse = false;
+  // 🔒 Advance diagnostic state
+  diagnosticState.awaitingResponse = true;
+  diagnosticState.nextExpected = "component_history";
+  diagnosticState.phase = "component_history";
 
- diagnosticState.phase = "component_history";
-
-    return {
-      reply: `Understood — misfire occurs at ${message.toLowerCase()}.
+  return {
+    reply: `Understood — misfire occurs at ${message.toLowerCase()}.
 
 Based on this pattern, we can narrow the direction:
 
 • Ignition issues often worsen under load  
 • Mechanical issues usually affect idle and load  
-• Fuel delivery problems can affect both
+• Fuel delivery problems can affect both  
 
 Next question:
-Has any ignition component (spark plug, wire, coil) been replaced recently on cylinder ${diagnosticState.primaryDTC.slice(-1)}?`,
-      vehicle: mergedVehicle
-    };
-  }
+Has any ignition component (spark plug, wire, or coil) been replaced recently on cylinder ${diagnosticState.primaryDTC.slice(-1)}?
+
+Yes or no.`,
+    vehicle: mergedVehicle
+  };
+}
+
 
   /* ---------- DOMAIN (READ-ONLY) ---------- */
   if (!diagnosticState.domain) {
