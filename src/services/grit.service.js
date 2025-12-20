@@ -419,6 +419,56 @@ Yes or no.`,
   };
 }
 
+/* ======================================================
+   ✅ CONSUME COMPONENT SWAP RESPONSE
+====================================================== */
+if (
+  diagnosticState.activePath === "misfire" &&
+  diagnosticState.phase === "component_swapped" &&
+  diagnosticState.awaitingResponse
+) {
+  const answer = normalize(message).toLowerCase();
+  diagnosticState.awaitingResponse = false;
+
+  if (answer.startsWith("y")) {
+    return {
+      reply: `Perfect.
+
+If the misfire moved with the component, that confirms a faulty ignition part.
+
+Next step:
+Replace the component that caused the misfire to move and clear codes.
+
+If you'd like, we can also verify wiring or PCM driver concerns.`,
+      vehicle: mergedVehicle
+    };
+  }
+
+  if (answer.startsWith("n")) {
+    diagnosticState.phase = "original_components";
+
+    return {
+      reply: `Understood.
+
+Since the misfire did NOT move with a swapped component, ignition is less likely.
+
+Next step:
+We need to check:
+• Injector operation on cylinder ${diagnosticState.primaryDTC.slice(-1)}
+• Compression / mechanical integrity
+
+Have you checked injector pulse or compression yet?`,
+      vehicle: mergedVehicle
+    };
+  }
+
+  return {
+    reply: "Please answer yes or no so we can continue.",
+    vehicle: mergedVehicle
+  };
+}
+
+
 
 
 
