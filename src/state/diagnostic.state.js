@@ -16,6 +16,9 @@ export const diagnosticState = {
   // 🔐 REQUIRED — DTC EXPLANATION GATE
   codeExplained: false,
 
+  // 🔐 MULTI-DTC SEQUENCING
+  lastExplainedDTC: null,
+
   // Diagnostic tracking
   currentStep: null,
   diagnosticPath: [],
@@ -40,8 +43,9 @@ export function resetDiagnosticState() {
   diagnosticState.activeDTCs = [];
   diagnosticState.primaryDTC = null;
 
-  // 🔐 RESET THE GATE
+  // 🔐 RESET EXPLANATION STATE
   diagnosticState.codeExplained = false;
+  diagnosticState.lastExplainedDTC = null;
 
   diagnosticState.currentStep = null;
   diagnosticState.diagnosticPath = [];
