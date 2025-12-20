@@ -433,6 +433,69 @@ Yes or no.`,
 
 
 /* ======================================================
+   ✅ CONSUME MISFIRE MOVED RESPONSE
+====================================================== */
+if (
+  diagnosticState.activePath === "misfire" &&
+  diagnosticState.phase === "component_swapped" &&
+  diagnosticState.awaitingResponse
+) {
+  const answer = normalize(message).toLowerCase();
+  diagnosticState.awaitingResponse = false;
+
+  // ------------------------------------------
+  // MISFIRE MOVED → COMPONENT FAULT
+  // ------------------------------------------
+  if (answer.startsWith("y")) {
+    diagnosticState.phase = "confirmed_component_fault";
+
+    return {
+      reply: `That’s important.
+
+If the misfire moved with the coil or plug, the component is faulty.
+
+Recommended next step:
+Replace the affected ignition component and recheck for misfire.
+
+Once replaced, clear codes and confirm the misfire is resolved.`,
+      vehicle: mergedVehicle
+    };
+  }
+
+  // ------------------------------------------
+  // MISFIRE DID NOT MOVE → NOT THE COMPONENT
+  // ------------------------------------------
+  if (answer.startsWith("n")) {
+    diagnosticState.phase = "component_ruled_out";
+
+    return {
+      reply: `Good diagnostic work.
+
+Since the misfire did NOT move, ignition components are less likely.
+
+Next diagnostic direction:
+• Fuel injector operation on cylinder ${diagnosticState.primaryDTC.slice(-1)}
+• Compression / leak-down test
+• Mechanical valve or lifter issue
+
+Next question:
+Have you verified fuel injector operation on cylinder ${diagnosticState.primaryDTC.slice(-1)}?
+
+Yes or no.`,
+      vehicle: mergedVehicle
+    };
+  }
+
+  diagnosticState.awaitingResponse = true;
+
+  return {
+    reply: `Please answer yes or no so we can continue.`,
+    vehicle: mergedVehicle
+  };
+}
+
+
+/* ======================================================
    ✅ CONSUME COMPONENT SWAP RESPONSE
 ====================================================== */
 if (
