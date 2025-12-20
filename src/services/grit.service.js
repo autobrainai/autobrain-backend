@@ -284,12 +284,20 @@ Rules:
 
     const handoff = `
 
-—
 Now that we understand what ${nextDTC} means, let’s start diagnosing it properly.
 `;
 
+    // Immediately transition into first diagnostic question
+    const diagnosticKickoff = firstQuestionGate({
+      message: nextDTC,
+      dtcs: diagnosticState.activeDTCs
+    });
+
     return {
-      reply: explanation.choices[0].message.content + handoff,
+      reply:
+        explanation.choices[0].message.content +
+        handoff +
+        (diagnosticKickoff ? `\n\n${diagnosticKickoff}` : ""),
       vehicle: mergedVehicle
     };
   }
