@@ -287,7 +287,6 @@ Rules:
 Now that we understand what ${nextDTC} means, let’s start diagnosing it properly.
 `;
 
-    // Immediately transition into first diagnostic question
     const diagnosticKickoff = firstQuestionGate({
       message: nextDTC,
       dtcs: diagnosticState.activeDTCs
@@ -300,6 +299,31 @@ Now that we understand what ${nextDTC} means, let’s start diagnosing it proper
         (diagnosticKickoff ? `\n\n${diagnosticKickoff}` : ""),
       vehicle: mergedVehicle
     };
+  }
+
+  /* ======================================================
+     ✅ CONSUME DIAGNOSTIC RESPONSE (ADDED)
+  ====================================================== */
+  if (diagnosticState.awaitingResponse) {
+    diagnosticState.awaitingResponse = false;
+
+    if (
+      diagnosticState.primaryDTC &&
+      /^P030[0-8]$/i.test(diagnosticState.primaryDTC)
+    ) {
+      diagnosticState.classification.misfire = normalize(message);
+
+      return {
+        reply: `Got it — misfire occurs ${message.toLowerCase()}.
+
+Next step:
+We need to determine whether this is ignition, fuel, or mechanical.
+
+Before continuing:
+• Is the misfire worse at idle, under load, or both?`,
+        vehicle: mergedVehicle
+      };
+    }
   }
 
   /* ---------- DOMAIN (READ-ONLY) ---------- */
