@@ -32,7 +32,6 @@ function normalize(msg = "") {
 function getNextUnexplainedDTC(state) {
   if (!state.activeDTCs || !state.activeDTCs.length) return null;
 
-  // first run
   if (!state.lastExplainedDTC) {
     return state.activeDTCs[0];
   }
@@ -252,24 +251,21 @@ export async function runGrit({ message, context = [], vehicleContext = {} }) {
 
   if (nextDTC && requiresDTCExplanation(diagnosticState)) {
     const explanationPrompt = `
-You are GRIT — an expert automotive diagnostic mentor.
+You are GRIT — a professional automotive diagnostic mentor.
 
-The diagnostic trouble code provided is: ${nextDTC}
+Explain diagnostic trouble code ${nextDTC} clearly and concisely.
 
-You MUST explain:
-- What this code actually means in plain English
-- What system or subsystem is involved
-- What the PCM/ECM is detecting at a logic level
-- What this code does NOT automatically mean
-- Common categories of causes (NO tests, NO fixes)
+Required structure:
+1) What this code means (plain English)
+2) What system is involved
+3) How the PCM/ECM detects it (high level)
+4) What this code does NOT automatically mean
 
 Rules:
-- Do NOT ask diagnostic questions
-- Do NOT suggest repairs
-- Do NOT advance troubleshooting
-- This explanation must stand alone
-
-This explanation is mandatory before diagnostics may begin.
+- Be concise
+- No repair instructions
+- No testing steps
+- No questions
 `;
 
     const explanation = await openai.chat.completions.create({
@@ -286,8 +282,14 @@ This explanation is mandatory before diagnostics may begin.
 
     diagnosticState.codeExplained = !moreRemaining;
 
+    const handoff = `
+
+—
+Now that we understand what ${nextDTC} means, let’s start diagnosing it properly.
+`;
+
     return {
-      reply: explanation.choices[0].message.content,
+      reply: explanation.choices[0].message.content + handoff,
       vehicle: mergedVehicle
     };
   }
