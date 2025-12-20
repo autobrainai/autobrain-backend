@@ -237,12 +237,18 @@ export async function runGrit({ message, context = [], vehicleContext = {} }) {
   }
 
   /* ---------- STORE DTCs + RESET EXPLANATION GATE ---------- */
-  if (dtcs.length) {
-    diagnosticState.activeDTCs = dtcs;
-    diagnosticState.primaryDTC = dtcs[0];
-    diagnosticState.codeExplained = false;
-    diagnosticState.lastExplainedDTC = null;
+if (dtcs.length) {
+  diagnosticState.activeDTCs = dtcs;
+  diagnosticState.primaryDTC = dtcs[0];
+  diagnosticState.codeExplained = false;
+  diagnosticState.lastExplainedDTC = null;
+
+  // 🔒 PATH LOCK
+  if (/^P030[0-8]$/i.test(dtcs[0])) {
+    diagnosticState.activePath = "misfire";
   }
+}
+
 
   /* ======================================================
      🔐 MULTI-DTC EXPLANATION SEQUENCE — HARD STOP
@@ -361,12 +367,16 @@ Has any ignition component (spark plug, wire, coil) been replaced recently on cy
   }
 
   /* ---------- FIRST QUESTION GATE ---------- */
-  if (!diagnosticState.awaitingResponse) {
-    const gate = firstQuestionGate({ message, dtcs });
-    if (gate) {
-      return { reply: gate, vehicle: mergedVehicle };
-    }
+  if (!diagnosticState.activePath && !diagnosticState.awaitingResponse) {
+  const gate = firstQuestionGate({
+  message,
+  dtcs: diagnosticState.activeDTCs || []
+});
+  if (gate) {
+    return { reply: gate, vehicle: mergedVehicle };
   }
+}
+
 
   /* ---------- SAFETY WARNINGS ---------- */
   const lastAssistant =
@@ -374,6 +384,7 @@ Has any ignition component (spark plug, wire, coil) been replaced recently on cy
   const safetyWarnings = collectSafetyWarnings([message, lastAssistant]);
 
   /* ---------- AI RESPONSE (EXPLANATION ONLY) ---------- */
+  if (!diagnosticState.activePath) {
   const ai = await openai.chat.completions.create({
     model: "gpt-4.1",
     temperature: 0.3,
@@ -405,3 +416,8 @@ ${JSON.stringify(mergedVehicle)}
     vehicle: mergedVehicle
   };
 }
+
+return {
+  reply: "Answer the last diagnostic question to continue.",
+  vehicle: mergedVehicle
+};
