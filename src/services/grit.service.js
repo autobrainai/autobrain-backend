@@ -27,6 +27,28 @@ function normalize(msg = "") {
 }
 
 /* ======================================================
+   🔐 MULTI-DTC EXPLANATION HELPERS
+====================================================== */
+function getNextUnexplainedDTC(state) {
+  if (!state.activeDTCs || !state.activeDTCs.length) return null;
+
+  // first run
+  if (!state.lastExplainedDTC) {
+    return state.activeDTCs[0];
+  }
+
+  const idx = state.activeDTCs.indexOf(state.lastExplainedDTC);
+  return state.activeDTCs[idx + 1] || null;
+}
+
+/* ======================================================
+   🔐 DTC EXPLANATION GATE HELPER
+====================================================== */
+function requiresDTCExplanation(state) {
+  return Boolean(state.primaryDTC && state.codeExplained === false);
+}
+
+/* ======================================================
    DTC EXTRACTION
 ====================================================== */
 function extractDTCs(message) {
@@ -213,6 +235,61 @@ export async function runGrit({ message, context = [], vehicleContext = {} }) {
     /(check engine|diagnose|misfire|no start|overheat|noise)/i.test(message)
   ) {
     diagnosticState.mode = "active";
+  }
+
+  /* ---------- STORE DTCs + RESET EXPLANATION GATE ---------- */
+  if (dtcs.length) {
+    diagnosticState.activeDTCs = dtcs;
+    diagnosticState.primaryDTC = dtcs[0];
+    diagnosticState.codeExplained = false;
+    diagnosticState.lastExplainedDTC = null;
+  }
+
+  /* ======================================================
+     🔐 MULTI-DTC EXPLANATION SEQUENCE — HARD STOP
+  ====================================================== */
+  const nextDTC = getNextUnexplainedDTC(diagnosticState);
+
+  if (nextDTC && requiresDTCExplanation(diagnosticState)) {
+    const explanationPrompt = `
+You are GRIT — an expert automotive diagnostic mentor.
+
+The diagnostic trouble code provided is: ${nextDTC}
+
+You MUST explain:
+- What this code actually means in plain English
+- What system or subsystem is involved
+- What the PCM/ECM is detecting at a logic level
+- What this code does NOT automatically mean
+- Common categories of causes (NO tests, NO fixes)
+
+Rules:
+- Do NOT ask diagnostic questions
+- Do NOT suggest repairs
+- Do NOT advance troubleshooting
+- This explanation must stand alone
+
+This explanation is mandatory before diagnostics may begin.
+`;
+
+    const explanation = await openai.chat.completions.create({
+      model: "gpt-4.1",
+      temperature: 0.3,
+      messages: [{ role: "system", content: explanationPrompt }]
+    });
+
+    diagnosticState.lastExplainedDTC = nextDTC;
+
+    const moreRemaining =
+      diagnosticState.activeDTCs.indexOf(nextDTC) <
+      diagnosticState.activeDTCs.length - 1;
+
+    diagnosticState.codeExplained = !moreRemaining;
+
+    return {
+      reply: explanation.choices[0].message.content,
+      vehicle: mergedVehicle
+    };
   }
 
   /* ---------- DOMAIN (READ-ONLY) ---------- */
