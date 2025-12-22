@@ -12,9 +12,20 @@ export const diagnosticState = {
   lastQuestion: null,          // intent or identifier of last asked question
 
   // -------------------------------------------
-  // Vehicle & DTC context
+  // Vehicle & DTC context (AUTHORITATIVE)
   // -------------------------------------------
-  vehicleContext: null,        // optional cached vehicle context
+  vehicleContext: {
+    confirmed: false,          // 🔒 true once Vehicle Context box is confirmed
+
+    year: null,
+    make: null,
+    model: null,
+    engine: null,
+    engineCode: null,
+    vin: null,                 // optional
+    source: null               // "vin" | "manual" | "mixed"
+  },
+
   activeDTCs: [],              // all detected DTCs
   primaryDTC: null,            // first / active DTC
 
@@ -48,13 +59,25 @@ export const diagnosticState = {
 
 /* ===========================================================
    🔁 AUTHORITATIVE RESET — HYBRID SAFE
+   This is the ONLY way vehicle context should be cleared.
 =========================================================== */
 export function resetDiagnosticState() {
   diagnosticState.mode = "idle";
   diagnosticState.awaitingResponse = false;
   diagnosticState.lastQuestion = null;
 
-  diagnosticState.vehicleContext = null;
+  diagnosticState.vehicleContext = {
+    confirmed: false,
+
+    year: null,
+    make: null,
+    model: null,
+    engine: null,
+    engineCode: null,
+    vin: null,
+    source: null
+  };
+
   diagnosticState.activeDTCs = [];
   diagnosticState.primaryDTC = null;
 
