@@ -1,10 +1,10 @@
 // ===========================================================
-// AUTO BRAIN — GRIT SERVICE (RESET / STABLE BASELINE)
-// OPTION A — DETERMINISTIC MODE
+// AUTO BRAIN — GRIT SERVICE (HYBRID v1)
+// Code controls truth (gates/state). GPT controls language.
 // ===========================================================
 
 import { getOpenAI } from "./openai.service.js";
-import { supabase } from "./supabase.service.js";
+import { supabase } from "./supabase.service.js"; // kept for future use
 import { GRIT_RULESET } from "../rules/grit.ruleset.js";
 
 import {
@@ -26,23 +26,42 @@ function normalize(msg = "") {
   return String(msg || "").trim();
 }
 
+function vehicleIsComplete(v = {}) {
+  return Boolean(v?.year && v?.make && v?.model && (v?.engine || v?.engineCode));
+}
+
+function resetDiagnosticSession() {
+  diagnosticState.mode = "idle";
+  diagnosticState.domain = null;
+  diagnosticState.activePath = null;
+
+  diagnosticState.activeDTCs = [];
+  diagnosticState.primaryDTC = null;
+
+  diagnosticState.codeExplained = false;
+  diagnosticState.lastExplainedDTC = null;
+
+  diagnosticState.awaitingResponse = false;
+  diagnosticState.lastQuestion = null;
+
+  // keep existing nested objects if you already use them
+  diagnosticState.classification = diagnosticState.classification || {};
+  diagnosticState.phase = null;
+  diagnosticState.nextExpected = null;
+}
+
 /* ======================================================
    🔐 MULTI-DTC EXPLANATION HELPERS
 ====================================================== */
 function getNextUnexplainedDTC(state) {
   if (!state.activeDTCs || !state.activeDTCs.length) return null;
 
-  if (!state.lastExplainedDTC) {
-    return state.activeDTCs[0];
-  }
+  if (!state.lastExplainedDTC) return state.activeDTCs[0];
 
   const idx = state.activeDTCs.indexOf(state.lastExplainedDTC);
   return state.activeDTCs[idx + 1] || null;
 }
 
-/* ======================================================
-   🔐 DTC EXPLANATION GATE HELPER
-====================================================== */
 function requiresDTCExplanation(state) {
   return Boolean(state.primaryDTC && state.codeExplained === false);
 }
@@ -111,72 +130,113 @@ function detectDomain({ message, dtcs }) {
 }
 
 /* ======================================================
-   FIRST-QUESTION GATES (ONLY QUESTION SOURCE)
+   DETERMINISTIC FIRST-QUESTION INTENTS (CODE CHOOSES)
+   GPT may phrase, but the intent is fixed.
 ====================================================== */
-function firstQuestionGate({ message, dtcs }) {
+function getFirstDiagnosticIntent({ message, dtcs, domain }) {
   const m = normalize(message).toLowerCase();
 
-  if (/no start/i.test(m)) {
-    diagnosticState.awaitingResponse = true;
-    return `Before any testing, classify the failure.
-
-When you turn the key:
-1) Does it CRANK but not start?
-2) Is it a NO-CRANK condition?
-
-Reply with one.`;
-  }
-
-  if (/overheat|running hot|temp gauge/i.test(m)) {
-    diagnosticState.awaitingResponse = true;
-    return `Classify the overheating condition:
-
-1) Idle / stopped
-2) Driving
-3) Highway / load
-4) Heats immediately after startup
-5) Gauge reads hot only
-
-Reply with the number.`;
-  }
+  // priority: strong keyword triggers
+  if (/no start/i.test(m)) return "classify_no_start";
+  if (/overheat|running hot|temp gauge/i.test(m)) return "classify_overheat";
 
   if (
     /misfire|p030[0-8]/i.test(m) ||
     dtcs.some((c) => /^P030[0-8]$/i.test(c))
   ) {
-    diagnosticState.awaitingResponse = true;
-    return `Classify the misfire:
-
-• Single cylinder or multiple/random?
-• Idle, load, cold, or all the time?
-
-Reply briefly.`;
+    return "classify_misfire";
   }
 
-  if (/p0171|p0174|lean/i.test(m)) {
-    diagnosticState.awaitingResponse = true;
-    return `Lean condition detected.
+  if (/p0171|p0174|lean/i.test(m)) return "classify_lean";
 
-Which applies?
-1) Bank 1
-2) Bank 2
-3) Both banks
-
-Reply with the number.`;
+  if (/evap|p04\d{2}|purge|vent/i.test(m) || domain === DOMAINS.evap) {
+    return "evap_initial_checks";
   }
 
-  if (/evap|p04\d{2}/i.test(m)) {
-    diagnosticState.awaitingResponse = true;
-    return `EVAP fault detected.
-
-Have you verified:
-• Gas cap seal/tightness
-• Visible purge/vent lines
-
-Yes or no?`;
+  // fallback by domain
+  switch (domain) {
+    case DOMAINS.network:
+      return "network_topology_freeze_frame";
+    case DOMAINS.brakes_abs:
+      return "abs_basics_speed_sensors";
+    case DOMAINS.transmission:
+      return "trans_basics_fluid_codes";
+    case DOMAINS.hvac:
+      return "hvac_basics_command_actual";
+    case DOMAINS.diesel_emissions:
+      return "diesel_emissions_basics_regen_data";
+    default:
+      return "general_kickoff";
   }
+}
 
-  return null;
+/* ======================================================
+   GPT HELPERS (HYBRID: GPT LANGUAGE, CODE CONTROL)
+====================================================== */
+async function gptExplainDTC({ openai, code, mergedVehicle }) {
+  const explanationPrompt = `
+You are GRIT — a professional automotive diagnostic mentor speaking to an experienced technician.
+
+Explain diagnostic trouble code ${code} briefly and clearly.
+
+Constraints:
+- Maximum 4 total sentences
+- Technician-level language
+- No headings, numbering, bullets, or formatting labels
+- No repair instructions
+- No testing steps
+- No questions
+`;
+
+  const explanation = await openai.chat.completions.create({
+    model: "gpt-4.1",
+    temperature: 0.3,
+    messages: [
+      {
+        role: "system",
+        content: `${explanationPrompt}\n\nVehicle Context:\n${JSON.stringify(
+          mergedVehicle
+        )}`
+      }
+    ]
+  });
+
+  return normalize(explanation?.choices?.[0]?.message?.content || "");
+}
+
+async function gptAskOneQuestion({ openai, intent, mergedVehicle, domain, dtc, safetyWarnings }) {
+  const prompt = `
+You are GRIT — a master-level automotive diagnostic assistant.
+
+Your job right now: ask ONE targeted diagnostic question (or ONE short yes/no check) that matches the diagnostic intent.
+
+Context:
+- Vehicle: ${JSON.stringify(mergedVehicle)}
+- Domain: ${domain || "unknown"}
+- Primary DTC: ${dtc || "none"}
+- Diagnostic intent: ${intent}
+
+Rules:
+- Ask ONE question only (no lists of questions)
+- Be concise and technician-focused
+- Do not add explanations unless absolutely required for the question
+- Do not provide repair instructions
+- Do not add multiple steps
+- If the intent is a classification intent, offer clear A/B style choices in the question
+`;
+
+  const ai = await openai.chat.completions.create({
+    model: "gpt-4.1",
+    temperature: 0.3,
+    messages: [
+      {
+        role: "system",
+        content: `${(safetyWarnings?.length ? safetyWarnings.join("\n") + "\n\n" : "")}${prompt}\n\n${GRIT_RULESET}`
+      }
+    ]
+  });
+
+  return normalize(ai?.choices?.[0]?.message?.content || "");
 }
 
 /* ======================================================
@@ -221,7 +281,7 @@ export async function runGrit({ message, context = [], vehicleContext = {} }) {
   let mergedVehicle = mergeVehicleContexts(vehicleContext, {});
   mergedVehicle.engine = inferEngineStringFromYMM(mergedVehicle);
 
-  /* ---------- QUICK ACK ---------- */
+  /* ---------- QUICK ACK (only when not active) ---------- */
   if (diagnosticState.mode !== "active") {
     const quick = buildShortAck(message, mergedVehicle);
     if (quick) return { reply: quick, vehicle: mergedVehicle };
@@ -237,18 +297,46 @@ export async function runGrit({ message, context = [], vehicleContext = {} }) {
   }
 
   /* ---------- STORE DTCs + RESET EXPLANATION GATE ---------- */
-if (dtcs.length) {
-  diagnosticState.activeDTCs = dtcs;
-  diagnosticState.primaryDTC = dtcs[0];
-  diagnosticState.codeExplained = false;
-  diagnosticState.lastExplainedDTC = null;
+  if (dtcs.length) {
+    diagnosticState.activeDTCs = dtcs;
+    diagnosticState.primaryDTC = dtcs[0];
 
-  // 🔒 PATH LOCK
-  if (/^P030[0-8]$/i.test(dtcs[0])) {
-    diagnosticState.activePath = "misfire";
+    diagnosticState.codeExplained = false;
+    diagnosticState.lastExplainedDTC = null;
+
+    diagnosticState.domain = null; // re-detect on new code
+    diagnosticState.lastQuestion = null;
+
+    // ensure these exist
+    diagnosticState.classification = diagnosticState.classification || {};
+    diagnosticState.phase = null;
+    diagnosticState.awaitingResponse = false;
+
+    // path lock only for dedicated deterministic flows
+    if (/^P030[0-8]$/i.test(dtcs[0])) {
+      diagnosticState.activePath = "misfire";
+    } else {
+      diagnosticState.activePath = null;
+    }
   }
-}
 
+  /* ======================================================
+     ✅ HARD GATE: VEHICLE REQUIRED BEFORE CODE ANALYSIS
+  ====================================================== */
+  if (diagnosticState.primaryDTC && !vehicleIsComplete(mergedVehicle)) {
+    return {
+      reply: `Got it — ${diagnosticState.primaryDTC}.
+
+Diagnostics vary by vehicle. I need:
+• Year
+• Make
+• Model
+• Engine (or engine code)
+
+Reply with those and I’ll start from the top.`,
+      vehicle: mergedVehicle
+    };
+  }
 
   /* ======================================================
      🔐 MULTI-DTC EXPLANATION SEQUENCE — HARD STOP
@@ -256,32 +344,10 @@ if (dtcs.length) {
   const nextDTC = getNextUnexplainedDTC(diagnosticState);
 
   if (nextDTC && requiresDTCExplanation(diagnosticState)) {
-const explanationPrompt = `
-You are GRIT — a professional automotive diagnostic mentor speaking to an experienced technician.
-
-Explain diagnostic trouble code ${nextDTC} briefly and clearly.
-
-Required content (do NOT label or number sections):
-- One short sentence explaining what the code indicates
-- One short sentence identifying the system involved
-- One short sentence describing, at a high level, how the PCM/ECM detects the fault
-- One short sentence clarifying what the code does NOT automatically mean
-
-Rules:
-- Maximum 4 total sentences
-- No headings, numbering, or bullet points
-- No repair instructions
-- No testing steps
-- No questions
-- Use concise, technician-level language
-`;
-
-
-
-    const explanation = await openai.chat.completions.create({
-      model: "gpt-4.1",
-      temperature: 0.3,
-      messages: [{ role: "system", content: explanationPrompt }]
+    const explanationText = await gptExplainDTC({
+      openai,
+      code: nextDTC,
+      mergedVehicle
     });
 
     diagnosticState.lastExplainedDTC = nextDTC;
@@ -292,324 +358,258 @@ Rules:
 
     diagnosticState.codeExplained = !moreRemaining;
 
-    const handoff = `
+    // After explanation, kick off with deterministic first intent (code chooses)
+    if (!diagnosticState.domain) {
+      diagnosticState.domain = detectDomain({ message: nextDTC, dtcs: diagnosticState.activeDTCs || [] });
+    }
 
-Now that we understand what ${nextDTC} means, let’s start diagnosing it properly.
-`;
-
-    const diagnosticKickoff = firstQuestionGate({
+    const intent = getFirstDiagnosticIntent({
       message: nextDTC,
-      dtcs: diagnosticState.activeDTCs
+      dtcs: diagnosticState.activeDTCs || [],
+      domain: diagnosticState.domain
+    });
+
+    diagnosticState.awaitingResponse = true;
+    diagnosticState.lastQuestion = intent;
+
+    const lastAssistant =
+      context?.length ? context[context.length - 1]?.content || "" : "";
+    const safetyWarnings = collectSafetyWarnings([message, lastAssistant]);
+
+    const kickoffQuestion = await gptAskOneQuestion({
+      openai,
+      intent,
+      mergedVehicle,
+      domain: diagnosticState.domain,
+      dtc: diagnosticState.primaryDTC,
+      safetyWarnings
     });
 
     return {
-      reply:
-        explanation.choices[0].message.content +
-        handoff +
-        (diagnosticKickoff ? `\n\n${diagnosticKickoff}` : ""),
+      reply: `${explanationText}
+
+Now that we understand what ${nextDTC} means, let’s diagnose it.
+
+${kickoffQuestion}`,
       vehicle: mergedVehicle
     };
   }
 
   /* ======================================================
-     ✅ CONSUME DIAGNOSTIC RESPONSE (FIXED)
+     ✅ DETERMINISTIC MISFIRE FLOW (KEEP LOCKED)
+     Hybrid note: misfire stays deterministic. GPT is not
+     allowed to invent the flow here.
   ====================================================== */
+
+  // Ensure classification container exists
+  diagnosticState.classification = diagnosticState.classification || {};
+
+  /* ---- MISFIRE: consume first classification reply ---- */
   if (
     diagnosticState.awaitingResponse &&
     diagnosticState.primaryDTC &&
     /^P030[0-8]$/i.test(diagnosticState.primaryDTC) &&
-    !diagnosticState.classification.misfire
+    diagnosticState.activePath === "misfire" &&
+    !diagnosticState.classification.misfire &&
+    diagnosticState.lastQuestion === "classify_misfire"
   ) {
     diagnosticState.classification.misfire = normalize(message);
     diagnosticState.awaitingResponse = false;
 
+    // ask next (deterministic) — keep your locked wording
+    diagnosticState.awaitingResponse = true;
+    diagnosticState.lastQuestion = "misfire_load";
+
     return {
-      reply: `Got it — misfire occurs ${message.toLowerCase()}.
+      reply: `Got it — misfire occurs ${normalize(message).toLowerCase()}.
 
-Next step:
-We need to determine whether this is ignition, fuel, or mechanical.
-
-Before continuing:
-• Is the misfire worse at idle, under load, or both?`,
+Is the misfire worse at idle, under load, or both?`,
       vehicle: mergedVehicle
     };
   }
 
-/* ======================================================
-   ✅ CONSUME MISFIRE LOAD RESPONSE (LOCKED)
-====================================================== */
-if (
-  diagnosticState.primaryDTC &&
-  /^P030[0-8]$/i.test(diagnosticState.primaryDTC) &&
-  diagnosticState.classification.misfire &&
-  !diagnosticState.classification.misfireLoad
-)
- {
-  diagnosticState.classification.misfireLoad = normalize(message);
+  /* ---- MISFIRE: consume load response ---- */
+  if (
+    diagnosticState.primaryDTC &&
+    /^P030[0-8]$/i.test(diagnosticState.primaryDTC) &&
+    diagnosticState.activePath === "misfire" &&
+    diagnosticState.classification.misfire &&
+    !diagnosticState.classification.misfireLoad &&
+    diagnosticState.awaitingResponse &&
+    diagnosticState.lastQuestion === "misfire_load"
+  ) {
+    diagnosticState.classification.misfireLoad = normalize(message);
+    diagnosticState.awaitingResponse = false;
 
-  // 🔒 Advance diagnostic state
-  diagnosticState.awaitingResponse = true;
-  diagnosticState.nextExpected = "component_history";
-  diagnosticState.phase = "component_history";
+    diagnosticState.awaitingResponse = true;
+    diagnosticState.phase = "component_history";
 
-  return {
-    reply: `Understood — misfire occurs at ${message.toLowerCase()}.
+    return {
+      reply: `Understood — misfire occurs at ${normalize(message).toLowerCase()}.
 
-Based on this pattern, we can narrow the direction:
-
-• Ignition issues often worsen under load  
-• Mechanical issues usually affect idle and load  
-• Fuel delivery problems can affect both  
-
-Next question:
 Has any ignition component (spark plug, wire, or coil) been replaced recently on cylinder ${diagnosticState.primaryDTC.slice(-1)}?
 
 Yes or no.`,
-    vehicle: mergedVehicle
-  };
-}
+      vehicle: mergedVehicle
+    };
+  }
 
-/* ======================================================
-   ✅ CONSUME COMPONENT HISTORY RESPONSE (LOCKED)
-====================================================== */
-if (
-  diagnosticState.activePath === "misfire" &&
-  diagnosticState.phase === "component_history" &&
-  diagnosticState.awaitingResponse
-) {
-  const answer = normalize(message).toLowerCase();
-
-  // 🔒 Consume response once
-  diagnosticState.awaitingResponse = false;
-
-  // ------------------------------------------
-  // YES / COMPONENT ALREADY REPLACED
-  // ------------------------------------------
+  /* ---- MISFIRE: component history ---- */
   if (
-    answer.startsWith("y") ||
-    answer.includes("plug") ||
-    answer.includes("coil") ||
-    answer.includes("wire")
+    diagnosticState.activePath === "misfire" &&
+    diagnosticState.phase === "component_history" &&
+    diagnosticState.awaitingResponse
   ) {
-    diagnosticState.phase = "component_swapped";
+    const answer = normalize(message).toLowerCase();
+    diagnosticState.awaitingResponse = false;
 
-    return {
-      reply: `Good to know.
+    if (
+      answer.startsWith("y") ||
+      answer.includes("plug") ||
+      answer.includes("coil") ||
+      answer.includes("wire")
+    ) {
+      diagnosticState.phase = "component_swapped";
+      diagnosticState.awaitingResponse = true;
 
-Since components have already been replaced, the next step is to verify whether the misfire follows the component or stays on cylinder ${diagnosticState.primaryDTC.slice(-1)}.
+      return {
+        reply: `Good to know.
 
 Have you swapped the coil or plug with another cylinder to see if the misfire moved?
 
 Yes or no.`,
-      vehicle: mergedVehicle
-    };
-  }
+        vehicle: mergedVehicle
+      };
+    }
 
-  // ------------------------------------------
-  // NO / ORIGINAL COMPONENTS
-  // ------------------------------------------
-  if (answer.startsWith("n")) {
-    diagnosticState.phase = "original_components";
+    if (answer.startsWith("n")) {
+      diagnosticState.phase = "original_components";
+      diagnosticState.awaitingResponse = true;
 
-    return {
-      reply: `Understood.
+      return {
+        reply: `Understood.
 
-Before replacing anything, we should confirm whether this is ignition, fuel, or mechanical.
-
-Next step:
 Have you checked spark on cylinder ${diagnosticState.primaryDTC.slice(-1)}?
 
 Yes or no.`,
+        vehicle: mergedVehicle
+      };
+    }
+
+    diagnosticState.awaitingResponse = true;
+    return {
+      reply: `Please answer yes or no so we can continue.`,
       vehicle: mergedVehicle
     };
   }
 
-  // ------------------------------------------
-  // INVALID RESPONSE
-  // ------------------------------------------
-  diagnosticState.awaitingResponse = true;
+  /* ---- MISFIRE: component swapped outcome ---- */
+  if (
+    diagnosticState.activePath === "misfire" &&
+    diagnosticState.phase === "component_swapped" &&
+    diagnosticState.awaitingResponse
+  ) {
+    const answer = normalize(message).toLowerCase();
+    diagnosticState.awaitingResponse = false;
 
-  return {
-    reply: `Please answer yes or no so we can continue.`,
-    vehicle: mergedVehicle
-  };
-}
+    if (answer.startsWith("y")) {
+      diagnosticState.phase = "confirmed_component_fault";
 
+      return {
+        reply: `That’s important.
 
-/* ======================================================
-   ✅ CONSUME MISFIRE MOVED RESPONSE
-====================================================== */
-if (
-  diagnosticState.activePath === "misfire" &&
-  diagnosticState.phase === "component_swapped" &&
-  diagnosticState.awaitingResponse
-) {
-  const answer = normalize(message).toLowerCase();
-  diagnosticState.awaitingResponse = false;
+If the misfire moved with the coil or plug, the swapped component is the problem.
 
-  // ------------------------------------------
-  // MISFIRE MOVED → COMPONENT FAULT
-  // ------------------------------------------
-  if (answer.startsWith("y")) {
-    diagnosticState.phase = "confirmed_component_fault";
+Replace the affected ignition component, clear codes, and verify the misfire is gone.`,
+        vehicle: mergedVehicle
+      };
+    }
 
-    return {
-      reply: `That’s important.
+    if (answer.startsWith("n")) {
+      diagnosticState.phase = "component_ruled_out";
+      diagnosticState.awaitingResponse = true;
 
-If the misfire moved with the coil or plug, the component is faulty.
-
-Recommended next step:
-Replace the affected ignition component and recheck for misfire.
-
-Once replaced, clear codes and confirm the misfire is resolved.`,
-      vehicle: mergedVehicle
-    };
-  }
-
-  // ------------------------------------------
-  // MISFIRE DID NOT MOVE → NOT THE COMPONENT
-  // ------------------------------------------
-  if (answer.startsWith("n")) {
-    diagnosticState.phase = "component_ruled_out";
-
-    return {
-      reply: `Good diagnostic work.
+      return {
+        reply: `Good diagnostic work.
 
 Since the misfire did NOT move, ignition components are less likely.
 
-Next diagnostic direction:
-• Fuel injector operation on cylinder ${diagnosticState.primaryDTC.slice(-1)}
-• Compression / leak-down test
-• Mechanical valve or lifter issue
-
-Next question:
-Have you verified fuel injector operation on cylinder ${diagnosticState.primaryDTC.slice(-1)}?
+Have you verified injector operation (pulse/command) on cylinder ${diagnosticState.primaryDTC.slice(-1)}?
 
 Yes or no.`,
-      vehicle: mergedVehicle
-    };
-  }
+        vehicle: mergedVehicle
+      };
+    }
 
-  diagnosticState.awaitingResponse = true;
-
-  return {
-    reply: `Please answer yes or no so we can continue.`,
-    vehicle: mergedVehicle
-  };
-}
-
-
-/* ======================================================
-   ✅ CONSUME COMPONENT SWAP RESPONSE
-====================================================== */
-if (
-  diagnosticState.activePath === "misfire" &&
-  diagnosticState.phase === "component_swapped" &&
-  diagnosticState.awaitingResponse
-) {
-  const answer = normalize(message).toLowerCase();
-  diagnosticState.awaitingResponse = false;
-
-  if (answer.startsWith("y")) {
+    diagnosticState.awaitingResponse = true;
     return {
-      reply: `Perfect.
-
-If the misfire moved with the component, that confirms a faulty ignition part.
-
-Next step:
-Replace the component that caused the misfire to move and clear codes.
-
-If you'd like, we can also verify wiring or PCM driver concerns.`,
+      reply: `Please answer yes or no so we can continue.`,
       vehicle: mergedVehicle
     };
   }
 
-  if (answer.startsWith("n")) {
-    diagnosticState.phase = "original_components";
-
-    return {
-      reply: `Understood.
-
-Since the misfire did NOT move with a swapped component, ignition is less likely.
-
-Next step:
-We need to check:
-• Injector operation on cylinder ${diagnosticState.primaryDTC.slice(-1)}
-• Compression / mechanical integrity
-
-Have you checked injector pulse or compression yet?`,
-      vehicle: mergedVehicle
-    };
-  }
-
-  return {
-    reply: "Please answer yes or no so we can continue.",
-    vehicle: mergedVehicle
-  };
-}
-
-
-
-
-
-  /* ---------- DOMAIN (READ-ONLY) ---------- */
+  /* ======================================================
+     DOMAIN SET (READ-ONLY)
+  ====================================================== */
   if (!diagnosticState.domain) {
     diagnosticState.domain = detectDomain({ message, dtcs });
   }
 
-  /* ---------- FIRST QUESTION GATE ---------- */
-  if (!diagnosticState.activePath && !diagnosticState.awaitingResponse) {
-  const gate = firstQuestionGate({
-  message,
-  dtcs: diagnosticState.activeDTCs || []
-});
-  if (gate) {
-    return { reply: gate, vehicle: mergedVehicle };
-  }
-}
-
-
-  /* ---------- SAFETY WARNINGS ---------- */
+  /* ======================================================
+     HYBRID NEXT-QUESTION HANDLING
+     If we're awaiting a response but not in a locked path,
+     we let GPT ask ONE good next question based on intent.
+====================================================== */
   const lastAssistant =
     context?.length ? context[context.length - 1]?.content || "" : "";
   const safetyWarnings = collectSafetyWarnings([message, lastAssistant]);
 
-  /* ---------- AI RESPONSE (EXPLANATION ONLY) ---------- */
-  if (!diagnosticState.activePath) {
-  const ai = await openai.chat.completions.create({
-    model: "gpt-4.1",
-    temperature: 0.3,
-    messages: [
-      {
-        role: "system",
-        content: `
-You are GRIT — a professional automotive diagnostic mentor.
+  // If we have no activePath and not awaitingResponse, choose the first intent and ask it.
+  if (!diagnosticState.activePath && !diagnosticState.awaitingResponse) {
+    const intent = getFirstDiagnosticIntent({
+      message,
+      dtcs: diagnosticState.activeDTCs || [],
+      domain: diagnosticState.domain
+    });
 
-You may EXPLAIN or CLARIFY.
-You may NOT introduce new diagnostic questions unless explicitly instructed.
+    diagnosticState.awaitingResponse = true;
+    diagnosticState.lastQuestion = intent;
 
-${safetyWarnings.length ? safetyWarnings.join("\n") + "\n\n" : ""}
-ACTIVE DOMAIN (locked): ${diagnosticState.domain}
+    const q = await gptAskOneQuestion({
+      openai,
+      intent,
+      mergedVehicle,
+      domain: diagnosticState.domain,
+      dtc: diagnosticState.primaryDTC,
+      safetyWarnings
+    });
 
-${GRIT_RULESET}
+    return { reply: q, vehicle: mergedVehicle };
+  }
 
-Vehicle Context:
-${JSON.stringify(mergedVehicle)}
-`
-      },
-      ...(context || []),
-      { role: "user", content: message }
-    ]
-  });
+  // If awaitingResponse but not in a locked deterministic path, ask a single next question (lightweight continuation).
+  if (!diagnosticState.activePath && diagnosticState.awaitingResponse) {
+    // Keep it simple: use a generic continuation intent that forces ONE next step question.
+    const intent = "continue_from_last_answer";
+    diagnosticState.lastQuestion = intent;
 
+    const q = await gptAskOneQuestion({
+      openai,
+      intent,
+      mergedVehicle,
+      domain: diagnosticState.domain,
+      dtc: diagnosticState.primaryDTC,
+      safetyWarnings
+    });
+
+    return { reply: q, vehicle: mergedVehicle };
+  }
+
+  /* ======================================================
+     FALLBACK (locked path but not matched)
+====================================================== */
   return {
-    reply: ai.choices[0].message.content,
+    reply: "Answer the last diagnostic question to continue.",
     vehicle: mergedVehicle
   };
-}
-
-return {
-  reply: "Answer the last diagnostic question to continue.",
-  vehicle: mergedVehicle
-};
 }
